@@ -1,0 +1,16 @@
+{
+  "name": "content-automation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Content automation platform: brief, AI content, approval, publishing",
+  "type": "module",
+  "main": "server.js",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0"
+  }
+}
