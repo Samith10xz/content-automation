@@ -20,11 +20,14 @@ async function boot() {
     // Keep serving a clear status instead of crashing, and try again shortly.
     problem = err.code || err.message;
     console.error('startup failed:', err.message);
-    setTimeout(boot, 15_000);
+    setTimeout(() => { booting = boot(); }, 15_000);
   }
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
+  // The host starts this process on the first request after idle: let that request
+  // wait for the database connection instead of answering "starting".
+  if (!app) await booting;
   if (app) return app.handle(req, res);
   const body = req.url === '/health'
     ? JSON.stringify({ ok: false, db: false, problem })
@@ -33,5 +36,5 @@ const server = http.createServer((req, res) => {
   res.end(body);
 });
 
+let booting = boot();
 server.listen(config.port, () => console.log(`listening on ${config.port}`));
-boot();
