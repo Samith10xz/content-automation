@@ -68,7 +68,8 @@ export async function generateContent({ apiKey, model, workspace, brief, platfor
       max_tokens: 2000,
       system: systemPrompt(workspace),
       tools: [tool(platforms)],
-      tool_choice: { type: 'tool', name: 'save_post' },
+      // Some models refuse a forced tool choice, so let the model choose and require the call in the prompt.
+      tool_choice: { type: 'auto' },
       messages: [{ role: 'user', content: userPrompt({ brief, platforms, previous, note }) }],
     }),
     signal: AbortSignal.timeout(90_000),
@@ -81,8 +82,14 @@ export async function generateContent({ apiKey, model, workspace, brief, platfor
     throw Object.assign(new Error(`Claude API error: ${message}`), { permanent });
   }
   const block = (data.content || []).find((b) => b.type === 'tool_use' && b.name === 'save_post');
-  if (!block) throw new Error('Claude did not return a post.');
-  const input = block.input || {};
+  // Fallback: a model that answered in text with a JSON object instead of calling the tool.
+  let input = block?.input;
+  if (!input) {
+    const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    const json = text.match(/\{[\s\S]*\}/);
+    try { input = json ? JSON.parse(json[0]) : null; } catch { input = null; }
+  }
+  if (!input) throw new Error('Claude did not return a post.');
   const content = {
     headline: String(input.headline || '').trim(),
     image_prompt: String(input.image_prompt || '').trim(),

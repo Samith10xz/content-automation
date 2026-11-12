@@ -181,3 +181,13 @@ test('Slack signatures: valid, tampered and stale', () => {
   assert.equal(verifySlackSignature({ ...base, timestamp: old['x-slack-request-timestamp'], signature: old['x-slack-signature'] }), false);
   assert.equal(verifySlackSignature({ ...base, signingSecret: '' }), false);
 });
+
+test('a post written as JSON text instead of a tool call is still accepted', async () => {
+  const { generateContent } = await import('../src/services/claude.js');
+  const fetchImpl = async (url, init) => {
+    assert.equal(JSON.parse(init.body).tool_choice.type, 'auto');
+    return { ok: true, status: 200, json: async () => ({ model: 'm', usage: {}, content: [{ type: 'text', text: 'Here it is:\n{"headline":"H","image_prompt":"I","captions":{"x":"C"},"hashtags":["a"],"cta":"Go"}' }] }) };
+  };
+  const r = await generateContent({ apiKey: 'k', workspace: { name: 'B' }, brief: { goal: 'g' }, platforms: ['x'], fetchImpl });
+  assert.equal(r.content.captions.x, 'C');
+});
