@@ -2,7 +2,7 @@ import { encrypt, decrypt } from './security.js';
 import { now } from './util.js';
 
 // Keys whose values are secrets: stored encrypted, never shown again in the UI.
-export const SECRET_KEYS = ['anthropic_api_key', 'slack_bot_token', 'slack_signing_secret', 'meta_app_secret', 'gemini_api_key'];
+export const SECRET_KEYS = ['anthropic_api_key', 'slack_bot_token', 'slack_signing_secret', 'meta_app_secret', 'gemini_api_key', 'canva_client_secret'];
 
 export function createSettings(db, secretKey) {
   return {

@@ -68,7 +68,18 @@ export async function testGemini({ apiKey, model, fetchImpl = fetch }) {
 }
 
 /** The instruction given to the image model for a post. */
-export function imagePrompt({ brand, content, hasLogo, editNote }) {
+export function imagePrompt({ brand, content, hasLogo, editNote, photoOnly = false }) {
+  // For a Canva template: only the picture. The template supplies the text, logo and layout.
+  if (photoOnly) {
+    return (editNote ? [
+      'Edit the attached image. Keep everything the same except for the requested changes.',
+      `Requested changes: ${editNote}`,
+    ] : [
+      `Create a high-quality image for a social media ad for the brand "${brand.name}".`,
+      `Visual: ${content.image_prompt}`,
+      'It will be placed inside a designed template, so keep the main subject near the centre with room around it.',
+    ]).concat('No text, letters, numbers, logos, watermarks or borders anywhere in the image.').join('\n');
+  }
   const lines = editNote ? [
     'Edit the attached social media ad image. Keep everything the same except for the requested changes.',
     `Requested changes: ${editNote}`,

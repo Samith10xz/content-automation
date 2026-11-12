@@ -145,4 +145,10 @@ export const migrations = [
     `ALTER TABLE posts ADD COLUMN source_ref VARCHAR(100) NULL`,
     `CREATE UNIQUE INDEX idx_posts_source ON posts (source_ref)`,
   ],
+  [
+    `ALTER TABLE connections ADD COLUMN data {{TEXT}}`,
+    `ALTER TABLE posts ADD COLUMN photo_id BIGINT NULL`,
+    `ALTER TABLE posts ADD COLUMN canva_design_id VARCHAR(64) NULL`,
+    `ALTER TABLE posts ADD COLUMN canva_edit_url VARCHAR(600) NULL`,
+  ],
 ];

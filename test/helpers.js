@@ -4,6 +4,7 @@ import { openDb } from '../src/db/index.js';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { createMeta } from '../src/services/meta.js';
+import { createCanva } from '../src/services/canva.js';
 
 /** Fake Claude + Slack. `state` lets a test inspect calls and force failures. */
 export function fakeFetch(state) {
@@ -26,6 +27,35 @@ export function fakeFetch(state) {
           hashtags: ['#ParcelLK', 'shipping'], cta: 'Book now', regenerate_image: wantsImage,
         } }],
       });
+    }
+    if (url.includes('export-download.canva.com')) {
+      state.exports++;
+      return { ok: true, status: 200, arrayBuffer: async () => makeJpeg(1200 + state.exports, 630) };
+    }
+    if (url.includes('api.canva.com')) {
+      const path = new URL(url).pathname.replace('/rest/v1', '');
+      const method = init?.method || 'GET';
+      const form = String(init?.headers?.['content-type'] || '').includes('urlencoded') ? Object.fromEntries(new URLSearchParams(init.body)) : null;
+      state.canva.push({ method, path, body: form || body, auth: init?.headers?.authorization });
+      if (path === '/oauth/token') {
+        if (form.grant_type === 'refresh_token' && form.refresh_token !== state.canvaRefresh) return json(400, { code: 'invalid_grant', message: 'bad refresh token' });
+        state.canvaRefresh = `refresh-${state.canva.length}`;
+        return json(200, { access_token: `access-${state.canva.length}`, refresh_token: state.canvaRefresh, expires_in: 14400 });
+      }
+      if (path === '/users/me') return json(200, { team_user: { user_id: 'CU1', team_id: 'CT1' } });
+      if (path === '/users/me/profile') return json(200, { profile: { display_name: 'GTV Designs' } });
+      if (path === '/users/me/capabilities') return json(200, { capabilities: state.canvaCaps });
+      if (path === '/brand-templates') return json(200, { items: [{ id: 'TPL1', title: 'FB offer post', thumbnail: { url: 'https://x/t.png' } }, { id: 'TPL2', title: 'Story' }] });
+      if (path === '/brand-templates/TPL1/dataset') return json(200, { dataset: { PHOTO: { type: 'image' }, HEADLINE: { type: 'text' }, CTA_BUTTON: { type: 'text' }, SALES: { type: 'chart' } } });
+      if (path === '/url-asset-uploads' && method === 'POST') return json(200, { job: { id: 'up1', status: 'in_progress' } });
+      if (path === '/url-asset-uploads/up1') return json(200, { job: { id: 'up1', status: 'success', asset: { id: 'ASSET1' } } });
+      if (path === '/autofills' && method === 'POST') {
+        if (state.canvaFail) return json(200, { job: { id: 'af1', status: 'failed', error: { code: state.canvaFail, message: 'nope' } } });
+        return json(200, { job: { id: 'af1', status: 'in_progress' } });
+      }
+      if (path === '/autofills/af1') { state.designs++; return json(200, { job: { id: 'af1', status: 'success', result: { type: 'create_design', design: { id: `DES${state.designs}`, urls: { edit_url: 'https://www.canva.com/api/design/abc/edit' } } } } }); }
+      if (path === '/exports' && method === 'POST') return json(200, { job: { id: 'ex1', status: 'success', urls: ['https://export-download.canva.com/file.jpg'] } });
+      return json(404, { code: 'not_found', message: `unknown ${path}` });
     }
     if (url.includes('generativelanguage.googleapis.com')) {
       if (url.includes('/models/')) return state.geminiStatus ? json(state.geminiStatus, { error: { message: 'API key not valid' } }) : json(200, { displayName: 'Nano Banana 2.1' });
@@ -62,13 +92,15 @@ export function fakeFetch(state) {
 export async function makeApp(env = {}) {
   const state = {
     calls: [], claudeStatus: 0, slackFail: false, graph: [], metaFail: {}, igStatus: [], geminiStatus: 0, images: 0,
+    canva: [], canvaCaps: ['autofill', 'brand_template'], canvaFail: '', canvaRefresh: '', exports: 0, designs: 0,
     pages: [{ id: '111', name: 'Parcel.lk', access_token: 'page-token', instagram_business_account: { id: '999', username: 'parcel.lk' } }],
   };
   const config = loadConfig({ SECRET_KEY: 'a'.repeat(64), SETUP_TOKEN: 'setup-token', CRON_SECRET: 'cron-secret', APP_URL: 'http://localhost', ...env });
   const db = await openDb(config.db);
   const fetchImpl = fakeFetch(state);
   const meta = createMeta({ fetchImpl, sleep: async () => {}, pollMs: 0, pollTries: 3 });
-  const app = createApp({ db, config, fetchImpl, log: { error() {} }, autoKick: false, meta });
+  const canva = createCanva({ fetchImpl, sleep: async () => {}, pollMs: 0, pollTries: 5 });
+  const app = createApp({ db, config, fetchImpl, log: { error() {} }, autoKick: false, meta, canva });
   return { app, db, state, config };
 }
 
@@ -130,4 +162,15 @@ export function makePng(width, height) {
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
   b.writeUInt32BE(13, 8); b.write('IHDR', 12); b.writeUInt32BE(width, 16); b.writeUInt32BE(height, 20);
   return b;
+}
+
+/** Connect a brand to the fake Canva account with template TPL1 and the usual field choices. */
+export async function connectCanva(ctx, workspaceId, { expiresAt = Date.now() + 3600_000, shape = '16:9' } = {}) {
+  const { encrypt } = await import('../src/security.js');
+  ctx.state.canvaRefresh = 'refresh-0';
+  const map = { capabilities: ['autofill'], shape, fields: { PHOTO: { type: 'image', use: 'photo' }, HEADLINE: { type: 'text', use: 'headline' }, CTA_BUTTON: { type: 'text', use: 'cta' }, SALES: { type: 'chart', use: 'none' } } };
+  await ctx.db.run(
+    `INSERT INTO connections (workspace_id, platform, account_id, account_name, extra_id, extra_name, token, data, connected_by, created_at, updated_at)
+     VALUES (?, 'canva', 'CU1', 'GTV Designs', 'TPL1', 'FB offer post', ?, ?, 'Sam', '2026-01-01 00:00:00', '2026-01-01 00:00:00')`,
+    [workspaceId, encrypt(JSON.stringify({ access: 'access-0', refresh: 'refresh-0', expiresAt }), ctx.config.secretKey), JSON.stringify(map)]);
 }

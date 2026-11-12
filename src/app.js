@@ -8,6 +8,7 @@ import { createSettings } from './settings.js';
 import { createSlack, verifySlackSignature } from './services/slack.js';
 import { DEFAULT_MODEL, testClaude } from './services/claude.js';
 import { DEFAULT_IMAGE_MODEL, testGemini } from './services/gemini.js';
+import { pkcePair, FIELD_USES, guessUse } from './services/canva.js';
 import { createEngine, ReviewError } from './engine.js';
 import * as views from './views.js';
 import { PLATFORMS, STATUS_LABELS, now, randomToken, safeEqual, parseJson, localToUtc, isValidTimeZone } from './util.js';
@@ -16,14 +17,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_DAYS = 14;
 const COLOR = /^#[0-9a-fA-F]{6}$/;
 
-export function createApp({ db, config, fetchImpl = fetch, log = console, autoKick = true, meta }) {
+export function createApp({ db, config, fetchImpl = fetch, log = console, autoKick = true, meta, canva }) {
   const settings = createSettings(db, config.secretKey);
   const slack = createSlack({ fetchImpl });
-  const engine = createEngine({ db, settings, slack, config, fetchImpl, log, autoKick, meta });
+  const engine = createEngine({ db, settings, slack, config, fetchImpl, log, autoKick, meta, canva });
   const router = new Router();
   const css = fs.readFileSync(path.join(here, '..', 'public', 'app.css'));
   const js = fs.readFileSync(path.join(here, '..', 'public', 'app.js'));
   const metaRedirect = `${config.appUrl}/api/oauth/meta/callback`;
+  const canvaRedirect = `${config.appUrl}/api/oauth/canva/callback`;
   const loginAttempts = new Map(); // ip -> { count, resetAt }
 
   // ---------- helpers ----------
@@ -254,6 +256,7 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
   router.post('/posts/:id/changes', reviewAction((ctx) => engine.requestChanges(ctx.params.id, ctx.session.user.name, String(ctx.body.note || '').slice(0, 1500)), 'Changes requested. Claude is rewriting the post.'));
   router.post('/posts/:id/retry', reviewAction((ctx) => engine.retry(ctx.params.id, ctx.session.user.name), 'Trying again.'));
   router.post('/posts/:id/image/generate', reviewAction((ctx) => engine.generateImageNow(ctx.params.id, ctx.session.user.name, String(ctx.body.note || '').slice(0, 1000)), 'Image generated.'));
+  router.post('/posts/:id/canva/import', reviewAction((ctx) => engine.importFromCanva(ctx.params.id, ctx.session.user.name), 'Imported the design from Canva.'));
   router.post('/posts/:id/image/remove', reviewAction((ctx) => engine.removeImage(ctx.params.id, ctx.session.user.name), 'Image removed.'));
   router.post('/posts/:id/publish/retry', reviewAction((ctx) => engine.retryPublish(ctx.params.id, ctx.session.user.name), 'Publishing again.'));
 
@@ -293,6 +296,8 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     metaReady: (await settings.has('meta_app_id')) && (await settings.has('meta_app_secret')),
     connection: brand.id ? await db.get(`SELECT * FROM connections WHERE workspace_id = ? AND platform = 'meta'`, [brand.id]) : null,
     logo: brand.id ? await engine.media.byId((await getBrand(brand.id))?.logo_id) : null,
+    canvaReady: (await settings.has('canva_client_id')) && (await settings.has('canva_client_secret')),
+    canvaConn: brand.id ? await db.get(`SELECT account_name, extra_id, extra_name, connected_by FROM connections WHERE workspace_id = ? AND platform = 'canva'`, [brand.id]) : null,
   });
 
   router.post('/brands/:id/logo', async (ctx) => {
@@ -424,6 +429,9 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
           geminiModel: (await settings.get('gemini_model')) || DEFAULT_IMAGE_MODEL,
           geminiSize: (await settings.get('gemini_image_size')) || '1K',
           eventsUrl: `${config.appUrl}/api/slack/events`,
+          canvaClientId: await settings.get('canva_client_id'),
+          canvaSecret: await settings.has('canva_client_secret'),
+          canvaRedirect,
           metaAppId: await settings.get('meta_app_id'),
           metaSecret: await settings.has('meta_app_secret'),
           metaConfigId: await settings.get('meta_config_id'),
@@ -472,6 +480,14 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     const name = await testGemini({ apiKey: await settings.get('gemini_api_key'), model: await settings.get('gemini_model'), fetchImpl });
     return `Gemini is connected (${name}).`;
   }));
+  router.post('/settings/canva', settingsAction(async (ctx) => {
+    const id = String(ctx.body.canva_client_id || '').trim();
+    const secret = String(ctx.body.canva_client_secret || '').trim();
+    if (id && !/^[A-Za-z0-9_\-]{6,80}$/.test(id)) throw new Error('That does not look like a Canva Client ID. It starts with OC-.');
+    await settings.set('canva_client_id', id);
+    if (secret) await settings.set('canva_client_secret', secret);
+    return 'Canva app settings saved.';
+  }));
   router.post('/settings/meta', settingsAction(async (ctx) => {
     const appId = String(ctx.body.meta_app_id || '').trim();
     const configId = String(ctx.body.meta_config_id || '').trim();
@@ -489,6 +505,100 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     const info = await slack.test(await settings.get('slack_bot_token'));
     return `Slack is connected to ${info.team || 'your workspace'} as ${info.user || 'the app'}.`;
   }));
+
+  // ---------- Canva: connect, choose a template, choose what fills each field ----------
+
+  const canvaRow = (brandId) => db.get(`SELECT * FROM connections WHERE workspace_id = ? AND platform = 'canva'`, [Number(brandId) || 0]);
+
+  router.get('/brands/:id/connect/canva', async (ctx) => {
+    const brand = await getBrand(ctx.params.id);
+    if (!brand) return notFound(ctx);
+    const clientId = await settings.get('canva_client_id');
+    if (!clientId || !(await settings.has('canva_client_secret'))) {
+      return redirect(ctx.res, withMsg(`/brands/${brand.id}`, 'err', 'Add the Canva Client ID and secret in Settings first.'));
+    }
+    const state = randomToken(24);
+    const { verifier, challenge } = pkcePair();
+    await db.run('DELETE FROM oauth_states WHERE created_at < ?', [now(-60 * 60_000)]);
+    await db.run('INSERT INTO oauth_states (state, user_id, workspace_id, data, created_at) VALUES (?, ?, ?, ?, ?)',
+      [state, ctx.session.user.id, brand.id, encrypt(verifier, config.secretKey), now()]);
+    redirect(ctx.res, engine.canva.authUrl({ clientId, redirectUri: canvaRedirect, state, challenge }));
+  });
+
+  router.get('/api/oauth/canva/callback', async (ctx) => {
+    const st = await loadState(ctx, ctx.query.get('state'));
+    if (!st?.data) return redirect(ctx.res, withMsg('/brands', 'err', 'That Canva connection link expired. Start again from the brand page.'));
+    const back = `/brands/${st.workspace_id}`;
+    await db.run('DELETE FROM oauth_states WHERE state = ?', [st.state]);
+    if (ctx.query.get('error') || !ctx.query.get('code')) return redirect(ctx.res, withMsg(back, 'err', 'The Canva connection was cancelled.'));
+    try {
+      const tokens = await engine.canva.exchangeCode({
+        clientId: await settings.get('canva_client_id'), clientSecret: await settings.get('canva_client_secret'),
+        redirectUri: canvaRedirect, code: ctx.query.get('code'), verifier: decrypt(st.data, config.secretKey),
+      });
+      const account = await engine.canva.account(tokens.access);
+      const t = now();
+      await db.run(`DELETE FROM connections WHERE workspace_id = ? AND platform = 'canva'`, [st.workspace_id]);
+      await db.run(
+        `INSERT INTO connections (workspace_id, platform, account_id, account_name, extra_id, extra_name, token, data, connected_by, created_at, updated_at)
+         VALUES (?, 'canva', ?, ?, NULL, NULL, ?, ?, ?, ?, ?)`,
+        [st.workspace_id, account.id || 'canva', account.name, encrypt(JSON.stringify(tokens), config.secretKey),
+          JSON.stringify({ capabilities: account.capabilities }), ctx.session.user.name, t, t]);
+      redirect(ctx.res, withMsg(`${back}/canva`, 'msg', `Connected to Canva as ${account.name}. Now choose the template.`));
+    } catch (err) {
+      log.error('canva connect failed', err.message);
+      redirect(ctx.res, withMsg(back, 'err', `Could not connect to Canva. ${err.message}`));
+    }
+  });
+
+  router.get('/brands/:id/canva', async (ctx) => {
+    const brand = await getBrand(ctx.params.id);
+    const row = brand && await canvaRow(brand.id);
+    if (!row) return redirect(ctx.res, `/brands/${Number(ctx.params.id) || 0}`);
+    let templates = []; let loadError = '';
+    try { templates = await engine.canva.listTemplates(await engine.canvaToken(row)); } catch (err) { loadError = err.message; }
+    render(ctx, { title: 'Canva template', active: 'brands', body: views.canvaBody({ brand, row: { ...row, map: parseJson(row.data, {}) }, templates, loadError, csrf: ctx.session.csrf }) });
+  });
+
+  router.post('/brands/:id/canva/template', async (ctx) => {
+    const brand = await getBrand(ctx.params.id);
+    const row = brand && await canvaRow(brand.id);
+    if (!row) return redirect(ctx.res, `/brands/${Number(ctx.params.id) || 0}`);
+    const back = `/brands/${brand.id}/canva`;
+    try {
+      const token = await engine.canvaToken(row);
+      const chosen = (await engine.canva.listTemplates(token)).find((t) => t.id === String(ctx.body.template_id));
+      if (!chosen) return redirect(ctx.res, withMsg(back, 'err', 'Choose a template from the list.'));
+      const types = await engine.canva.dataset(token, chosen.id);
+      const taken = new Set(); const fields = {};
+      for (const [name, type] of Object.entries(types)) {
+        const use = guessUse(name, type, taken);
+        if (use !== 'none') taken.add(use);
+        fields[name] = { type, use };
+      }
+      const map = { ...parseJson(row.data, {}), fields, shape: parseJson(row.data, {}).shape || '1:1' };
+      await db.run('UPDATE connections SET extra_id = ?, extra_name = ?, data = ?, updated_at = ? WHERE id = ?', [chosen.id, chosen.title, JSON.stringify(map), now(), row.id]);
+      redirect(ctx.res, withMsg(back, 'msg', `Template "${chosen.title}" selected. Check what fills each field.`));
+    } catch (err) { redirect(ctx.res, withMsg(back, 'err', err.message)); }
+  });
+
+  router.post('/brands/:id/canva/fields', async (ctx) => {
+    const row = await canvaRow(ctx.params.id);
+    if (!row?.extra_id) return redirect(ctx.res, `/brands/${Number(ctx.params.id) || 0}`);
+    const map = parseJson(row.data, {});
+    for (const [name, f] of Object.entries(map.fields || {})) {
+      const use = String(ctx.body[`use_${name}`] || 'none');
+      f.use = FIELD_USES[f.type]?.[use] ? use : 'none';
+    }
+    map.shape = ['1:1', '4:5', '16:9', '9:16', '3:4', '4:3'].includes(ctx.body.shape) ? ctx.body.shape : '1:1';
+    await db.run('UPDATE connections SET data = ?, updated_at = ? WHERE id = ?', [JSON.stringify(map), now(), row.id]);
+    redirect(ctx.res, withMsg(`/brands/${Number(ctx.params.id)}`, 'msg', 'Canva template saved. New posts will be designed with it.'));
+  });
+
+  router.post('/brands/:id/disconnect/canva', async (ctx) => {
+    await db.run(`DELETE FROM connections WHERE workspace_id = ? AND platform = 'canva'`, [Number(ctx.params.id) || 0]);
+    redirect(ctx.res, withMsg(`/brands/${Number(ctx.params.id) || 0}`, 'msg', 'Disconnected from Canva. Images now come straight from Gemini.'));
+  });
 
   // ---------- public pages Meta requires for a live app ----------
 

@@ -1,5 +1,6 @@
 import { esc, formatTime, PLATFORMS, STATUS_LABELS, MAX_VERSIONS, PUBLISHABLE } from './util.js';
 import { instagramProblem } from './media.js';
+import { FIELD_USES } from './services/canva.js';
 
 const FONTS = 'https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap';
 
@@ -173,7 +174,69 @@ function logoCard({ brand, csrf, logo }) {
 </div>`;
 }
 
-export function brandFormBody({ brand, csrf, err, slackReady, metaReady, connection, logo }) {
+function canvaCard({ brand, csrf, canvaReady, canvaConn }) {
+  if (!brand.id) return '';
+  let body;
+  if (canvaConn?.extra_id) {
+    body = `<p>Template: <strong>${esc(canvaConn.extra_name)}</strong></p>
+  <p class="muted">Canva account: ${esc(canvaConn.account_name)}. Each post gets a Gemini photo placed in this template, and the finished design is exported from Canva.</p>
+  <div class="row"><a class="btn" href="/brands/${brand.id}/canva">Change template or fields</a>
+  <form method="post" action="/brands/${brand.id}/disconnect/canva">${csrfField(csrf)}<button class="btn bad" type="submit">Disconnect</button></form></div>`;
+  } else if (canvaConn) {
+    body = `<p class="muted">Connected as ${esc(canvaConn.account_name)}, but no template is chosen yet.</p>
+  <div><a class="btn primary" href="/brands/${brand.id}/canva">Choose the template</a></div>`;
+  } else if (canvaReady) {
+    body = `<p class="muted">Use one of your Canva brand templates for this brand’s posts. Gemini makes the photo, Canva places it in the template with the headline, and the finished design comes back here for approval.</p>
+  <div><a class="btn primary" href="/brands/${brand.id}/connect/canva">Connect Canva</a></div>`;
+  } else {
+    body = '<p class="muted">Add the Canva Client ID and secret in <a href="/settings">Settings</a> first.</p>';
+  }
+  return `<div class="card">
+  <div class="row spread"><h2>Canva template</h2>${canvaConn?.extra_id ? '<span class="pill approved">In use</span>' : '<span class="pill">Not set</span>'}</div>
+  ${body}
+</div>`;
+}
+
+export function canvaBody({ brand, row, templates, loadError, csrf }) {
+  const caps = row.map.capabilities || [];
+  const noAutofill = caps.length > 0 && !caps.includes('autofill');
+  const fields = Object.entries(row.map.fields || {});
+  const shapes = { '1:1': 'Square (1:1)', '4:5': 'Portrait (4:5)', '3:4': 'Portrait (3:4)', '9:16': 'Tall (9:16)', '4:3': 'Landscape (4:3)', '16:9': 'Wide (16:9)' };
+  return `<p><a href="/brands/${brand.id}">← ${esc(brand.name)}</a></p>
+<h1>Canva template for ${esc(brand.name)}</h1>
+${noAutofill ? notice('warn', 'Canva reports that this account cannot use Autofill. It needs Canva Pro, Teams or Enterprise with multi-factor authentication turned on. You can still choose a template, but filling it may be refused.') : ''}
+${loadError ? notice('bad', loadError) : ''}
+<form class="card" method="post" action="/brands/${brand.id}/canva/template">
+  ${csrfField(csrf)}
+  <h2>1. Choose the template</h2>
+  ${templates.length ? `<div class="pages">${templates.map((t, i) => `<label for="tpl_${i}"><input id="tpl_${i}" type="radio" name="template_id" value="${esc(t.id)}"${t.id === row.extra_id ? ' checked' : ''} required>
+    <span><strong>${esc(t.title)}</strong></span></label>`).join('')}</div>
+  <div><button class="btn primary" type="submit">Use this template</button></div>`
+    : `<p class="muted">${loadError ? 'The templates could not be loaded.' : 'No brand templates with data fields were found in this Canva account.'}</p>`}
+  <details><summary>How to prepare a template in Canva</summary>
+    <ol class="steps">
+      <li>Open your design in Canva. In the side panel choose <strong>Apps → Bulk Create</strong>, then <strong>Labels</strong>.</li>
+      <li>Click the photo and add a data field, for example <span class="mono">PHOTO</span>. Click the headline text and add <span class="mono">HEADLINE</span>. Optionally a button text as <span class="mono">CTA</span>.</li>
+      <li>Publish the design as a <strong>Brand template</strong> (Share → Brand template).</li>
+      <li>Reload this page. The template appears in the list.</li>
+    </ol>
+  </details>
+</form>
+${row.extra_id ? `<form class="card" method="post" action="/brands/${brand.id}/canva/fields">
+  ${csrfField(csrf)}
+  <h2>2. What fills each field of “${esc(row.extra_name)}”</h2>
+  ${fields.length ? fields.map(([name, f], i) => (FIELD_USES[f.type]
+    ? `<label for="use_${i}"><span><span class="mono">${esc(name)}</span> <small>${f.type === 'image' ? 'image field' : 'text field'}</small></span>
+    <select id="use_${i}" name="use_${esc(name)}">${Object.entries(FIELD_USES[f.type]).map(([k, label]) => `<option value="${k}"${f.use === k ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>`
+    : `<p class="muted"><span class="mono">${esc(name)}</span>: ${esc(f.type)} fields are left as designed.</p>`)).join('')
+    : '<p class="muted">This template has no data fields.</p>'}
+  <label for="shape">Shape of the photo area <small>Gemini makes the photo in this shape so it fits the template without awkward cropping.</small>
+    <select id="shape" name="shape">${Object.entries(shapes).map(([k, label]) => `<option value="${k}"${(row.map.shape || '1:1') === k ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
+  <div><button class="btn primary" type="submit">Save</button></div>
+</form>` : ''}`;
+}
+
+export function brandFormBody({ brand, csrf, err, slackReady, metaReady, connection, logo, canvaReady, canvaConn }) {
   const b = brand;
   const isNew = !b.id;
   return `<p><a href="/brands">← Brands</a></p>
@@ -201,6 +264,7 @@ ${notice('bad', err)}
     <input id="slack_request_channel" name="slack_request_channel" type="text" value="${esc(b.slack_request_channel)}" maxlength="30" placeholder="C0456EFGH"></label>
   <div class="row"><button class="btn primary" type="submit">${isNew ? 'Add brand' : 'Save changes'}</button></div>
 </form>
+${canvaCard({ brand: b, csrf, canvaReady, canvaConn })}
 ${logoCard({ brand: b, csrf, logo })}
 ${connectionsCard({ brand: b, csrf, metaReady, connection })}`;
 }
@@ -252,6 +316,8 @@ const EVENT_LABELS = {
   slack_failed: 'Slack message failed', approved: 'Approved', rejected: 'Rejected',
   changes_requested: 'Changes requested', failed: 'Failed', retried: 'Retried',
   image_added: 'Image added', image_removed: 'Image removed', published: 'Published',
+  photo_generated: 'Photo generated', photo_edited: 'Photo changed', canva_composed: 'Designed in Canva',
+  canva_failed: 'Canva step failed', canva_imported: 'Imported from Canva',
   image_generated: 'Image generated', image_edited: 'Image changed', image_failed: 'Image generation failed', image_kept: 'Image not changed',
   publish_failed: 'Publishing failed', publish_retried: 'Publishing retried',
 };
@@ -276,7 +342,7 @@ function imageCard({ post, brand, csrf, geminiReady }) {
     : c ? `<div class="preview" style="background:${esc(brand.primary_color)};color:${textOn(brand.primary_color)}"><span class="ph">${esc(c.headline)}</span><span class="pb">${esc(brand.name)}</span></div>
       <p class="muted">Layout sketch only. This is not published.</p>` : '';
   const canGenerate = geminiReady && c && ['in_review', 'approved', 'scheduled', 'publish_failed'].includes(post.status);
-  const madeByGemini = post.image?.source === 'gemini';
+  const madeByGemini = ['gemini', 'canva'].includes(post.image?.source);
   const generate = canGenerate ? `<form class="stack" method="post" action="/posts/${post.id}/image/generate">${csrfField(csrf)}
       <label for="image_note">${post.image ? (madeByGemini ? 'Change this image' : 'Replace with a generated image') : 'Generate the image'} <small>${madeByGemini ? 'Say what to change, or leave empty for a completely new image.' : 'Optional: anything extra the image should show.'} Takes up to a minute.</small>
         <input id="image_note" name="note" type="text" maxlength="1000" placeholder="${madeByGemini ? 'Make the background lighter and the headline bigger' : ''}"></label>
@@ -284,7 +350,12 @@ function imageCard({ post, brand, csrf, geminiReady }) {
     </form>` : '';
   return `<div class="card"><h2>Image</h2>
     ${igWarning && canEdit ? `<div class="notice warn">${esc(igWarning)}</div>` : ''}
-    ${shown}${post.image ? `<p class="muted">${madeByGemini ? 'Made by Gemini.' : 'Uploaded by hand.'}</p>` : ''}${remove}${generate}${upload}
+    ${shown}${post.image ? `<p class="muted">${{ gemini: 'Made by Gemini.', canva: 'Designed in your Canva template, with a photo from Gemini.' }[post.image.source] || 'Uploaded by hand.'}</p>` : ''}
+    ${!post.image && post.photo ? `<div class="notice warn">The photo is ready but it has not been placed in the Canva template. See Activity for the reason, then use Generate again.</div><img class="post-image" src="${esc(post.photo.url)}" alt="Photo from Gemini" width="${post.photo.width}" height="${post.photo.height}">` : ''}
+    ${post.canva_design_id && canEdit ? `<div class="row">${post.canva_edit_url ? `<a class="btn" href="${esc(post.canva_edit_url)}" target="_blank" rel="noopener">Edit in Canva</a>` : ''}
+      <form method="post" action="/posts/${post.id}/canva/import">${csrfField(csrf)}<button class="btn" type="submit">Import the edited design</button></form></div>
+      <p class="muted">Adjust the design in Canva if needed, then import it so the approved post uses your edit.</p>` : ''}
+    ${remove}${generate}${upload}
     ${c?.image_prompt ? `<div class="caption"><h3>Image idea from Claude</h3><p>${esc(c.image_prompt)}</p></div>` : ''}
   </div>`;
 }
@@ -412,6 +483,17 @@ export function settingsBody({ csrf, state, appUrl }) {
   </div>
   <div class="row"><button class="btn primary" type="submit">Save</button>
     ${state.geminiKey ? `<button class="btn" type="submit" formaction="/settings/gemini/test">Save and test</button>` : ''}</div>
+</form>
+<form class="card" method="post" action="/settings/canva">
+  ${csrfField(csrf)}
+  <div class="row spread"><h2>Canva templates</h2>${saved(state.canvaClientId && state.canvaSecret)}</div>
+  <p class="muted">Create an integration at canva.com/developers/integrations with the scopes for assets, brand templates, designs and profile, and add this as the redirect URL:</p>
+  <p class="mono" style="overflow-wrap:anywhere">${esc(state.canvaRedirect)}</p>
+  <label for="canva_client_id">Client ID<input id="canva_client_id" name="canva_client_id" type="text" value="${esc(state.canvaClientId)}" maxlength="80" placeholder="OC-..."></label>
+  <label for="canva_client_secret">Client secret <small>${state.canvaSecret ? 'Saved. Enter a new one only to replace it.' : 'Generated on the integration’s Authentication page'}</small>
+    <input id="canva_client_secret" name="canva_client_secret" type="password" autocomplete="off" placeholder="${state.canvaSecret ? '••••••••' : ''}"></label>
+  <div class="row"><button class="btn primary" type="submit">Save</button></div>
+  <p class="muted">Then connect Canva and choose a template on each brand page.</p>
 </form>
 <form class="card" method="post" action="/settings/meta">
   ${csrfField(csrf)}

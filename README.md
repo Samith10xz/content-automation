@@ -46,3 +46,17 @@ A Meta app in Development mode publishes posts only people with a role on the ap
   A design uploaded by hand is never overwritten.
 - Slack app needs Event Subscriptions (`/api/slack/events`, events `message.channels`, `message.groups`)
   and the scopes `channels:history`, `groups:history`.
+
+## Canva templates
+
+With a Canva brand template chosen for a brand, each post is designed in Canva:
+Gemini makes a text-free photo → it is imported into Canva → the template's data fields are filled
+(photo, headline, call to action, brand name) → the design is exported as a JPG and becomes the post image.
+
+- Settings → Canva templates: Client ID and secret of a Canva integration (canva.com/developers/integrations)
+  with redirect URL `/api/oauth/canva/callback` and the asset, brand template, design and profile scopes.
+- Brand page → Connect Canva → choose the template → choose what fills each field.
+- In Canva, mark the template's fields with Apps → Bulk Create → Labels, then publish it as a Brand template.
+- The Canva account needs Autofill (Pro, Teams or Enterprise) and multi-factor authentication.
+- Text feedback re-fills the template with the same photo; picture feedback edits the photo first.
+  "Edit in Canva" + "Import the edited design" brings hand edits back.

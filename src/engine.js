@@ -5,6 +5,8 @@ import { MAX_VERSIONS, PLATFORMS, PUBLISHABLE, now, parseJson, formatTime } from
 import { generateContent, DEFAULT_MODEL } from './services/claude.js';
 import { createMeta } from './services/meta.js';
 import { generateImage, imagePrompt, DEFAULT_IMAGE_MODEL } from './services/gemini.js';
+import { createCanva, autofillData } from './services/canva.js';
+import { encrypt } from './security.js';
 import { createMedia, instagramProblem } from './media.js';
 import { decrypt } from './security.js';
 
@@ -20,10 +22,11 @@ export function captionFor(post, platform) {
   return [c.captions?.[platform] || '', tags].filter(Boolean).join('\n\n');
 }
 
-export function createEngine({ db, settings, slack, config, fetchImpl = fetch, log = console, autoKick = true, meta }) {
+export function createEngine({ db, settings, slack, config, fetchImpl = fetch, log = console, autoKick = true, meta, canva }) {
   let draining = false;
   const media = createMedia(db, config.appUrl);
   meta = meta || createMeta({ fetchImpl });
+  canva = canva || createCanva({ fetchImpl });
 
   const hydrate = (row) => row && {
     ...row,
@@ -34,7 +37,10 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
 
   async function getPost(id) {
     const post = hydrate(await db.get('SELECT * FROM posts WHERE id = ?', [Number(id)]));
-    if (post) post.image = await media.forPost(post);
+    if (post) {
+      post.image = await media.forPost(post);
+      post.photo = post.photo_id ? await media.byId(post.photo_id) : null;
+    }
     return post;
   }
 
@@ -125,39 +131,142 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
    * Make (or edit) the post's image with Gemini. Never throws: a failure is recorded on the post
    * and the post carries on without a new image.
    */
-  async function makeImage(post, ws, content, { editNote = '', previousId = null } = {}) {
+  async function renderWithGemini(post, ws, content, { editNote = '', previousId = null, photoOnly = false, aspectRatio = '4:5' } = {}) {
     const apiKey = await settings.get('gemini_api_key');
-    if (!apiKey) return false;
+    if (!apiKey) return null;
     const references = [];
     const previous = editNote && previousId ? await media.bytes(previousId) : null;
     if (previous) references.push(previous);
-    const logo = !previous && ws.logo_id ? await media.bytes(ws.logo_id) : null;
+    const logo = !previous && !photoOnly && ws.logo_id ? await media.bytes(ws.logo_id) : null;
     if (logo) references.push(logo);
     const model = (await settings.get('gemini_model')) || DEFAULT_IMAGE_MODEL;
     const args = {
-      apiKey, model, references, fetchImpl,
+      apiKey, model, references, fetchImpl, aspectRatio,
       imageSize: (await settings.get('gemini_image_size')) || '1K',
-      prompt: imagePrompt({ brand: ws, content, hasLogo: !!logo, editNote: previous ? editNote : '' }),
+      prompt: imagePrompt({ brand: ws, content, hasLogo: !!logo, editNote: previous ? editNote : '', photoOnly }),
     };
-    let buf;
-    for (let attempt = 1; !buf; attempt++) {
-      try { buf = await generateImage(args); } catch (err) {
-        if (err.permanent || attempt >= 2) { await addEvent(post.id, 'image_failed', 'Gemini', err.message); return false; }
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const buf = await generateImage(args);
+        await db.run(
+          `INSERT INTO usage_log (workspace_id, post_id, kind, model, input_tokens, output_tokens, created_at) VALUES (?, ?, 'image', ?, 0, 0, ?)`,
+          [post.workspace_id, post.id, model, now()]);
+        return { buf, edited: !!previous };
+      } catch (err) {
+        if (err.permanent || attempt >= 2) { await addEvent(post.id, 'image_failed', 'Gemini', err.message); return null; }
       }
     }
+  }
+
+  /** Finished image straight from Gemini (headline and logo drawn by Gemini). Used when the brand has no Canva template. */
+  async function makeImage(post, ws, content, opts = {}) {
+    const out = await renderWithGemini(post, ws, content, opts);
+    if (!out) return false;
     try {
-      const saved = await media.saveAny(post.id, buf, 'gemini');
+      const saved = await media.saveAny(post.id, out.buf, 'gemini');
       await db.run('UPDATE posts SET image_id = ?, updated_at = ? WHERE id = ?', [saved.id, now(), post.id]);
       if (post.image_id) await db.run('DELETE FROM media WHERE id = ?', [post.image_id]);
-      await db.run(
-        `INSERT INTO usage_log (workspace_id, post_id, kind, model, input_tokens, output_tokens, created_at) VALUES (?, ?, 'image', ?, 0, 0, ?)`,
-        [post.workspace_id, post.id, model, now()]);
-      await addEvent(post.id, previous ? 'image_edited' : 'image_generated', 'Gemini', `${saved.width}×${saved.height}`);
+      await addEvent(post.id, out.edited ? 'image_edited' : 'image_generated', 'Gemini', `${saved.width}×${saved.height}`);
       return true;
     } catch (err) {
       await addEvent(post.id, 'image_failed', 'Gemini', err.message);
       return false;
     }
+  }
+
+  // ---- Canva template ----
+
+  /** The brand's Canva connection, if it is connected and a template is chosen. */
+  async function canvaConnection(workspaceId) {
+    const row = await db.get(`SELECT * FROM connections WHERE workspace_id = ? AND platform = 'canva'`, [workspaceId]);
+    if (!row || !row.extra_id) return null;
+    return { ...row, map: parseJson(row.data, {}) };
+  }
+
+  /** A valid Canva access token for a connection row, refreshing (and storing the new refresh token) when needed. */
+  async function canvaToken(row) {
+    let tokens = parseJson(decrypt(row.token, config.secretKey), {});
+    if (!tokens.access || tokens.expiresAt - 5 * 60_000 < Date.now()) {
+      tokens = await canva.refresh({
+        clientId: await settings.get('canva_client_id'), clientSecret: await settings.get('canva_client_secret'),
+        refreshToken: tokens.refresh,
+      });
+      await db.run('UPDATE connections SET token = ?, updated_at = ? WHERE id = ?', [encrypt(JSON.stringify(tokens), config.secretKey), now(), row.id]);
+    }
+    return tokens.access;
+  }
+
+  /** Photo only (no text or logo) for the Canva template. Returns the media id, or null. */
+  async function makePhoto(post, ws, content, conn, { editNote = '' } = {}) {
+    const out = await renderWithGemini(post, ws, content, {
+      editNote, previousId: post.photo_id, photoOnly: true, aspectRatio: conn.map.shape || '1:1',
+    });
+    if (!out) return null;
+    const saved = await media.saveAny(post.id, out.buf, 'photo');
+    await db.run('UPDATE posts SET photo_id = ?, updated_at = ? WHERE id = ?', [saved.id, now(), post.id]);
+    if (post.photo_id) await db.run('DELETE FROM media WHERE id = ?', [post.photo_id]);
+    await addEvent(post.id, out.edited ? 'photo_edited' : 'photo_generated', 'Gemini', `${saved.width}×${saved.height}`);
+    return saved.id;
+  }
+
+  /** Put the photo and text into the Canva template, export the design and make it the post's image. */
+  async function composeCanva(post, ws, content, conn, photoId) {
+    try {
+      const token = await canvaToken(conn);
+      const photo = await media.byId(photoId);
+      const assetId = photo ? await canva.uploadFromUrl(token, `${ws.name} post ${post.id}`, photo.url) : null;
+      const design = await canva.autofill(token, {
+        templateId: conn.extra_id, title: `${ws.name} – ${content.headline}`,
+        data: autofillData(conn.map.fields, { assetId, content, brandName: ws.name }),
+      });
+      const saved = await media.saveAny(post.id, await canva.exportJpg(token, design.id), 'canva');
+      await db.run('UPDATE posts SET image_id = ?, canva_design_id = ?, canva_edit_url = ?, updated_at = ? WHERE id = ?',
+        [saved.id, design.id, design.editUrl.slice(0, 600), now(), post.id]);
+      if (post.image_id) await db.run('DELETE FROM media WHERE id = ?', [post.image_id]);
+      await addEvent(post.id, 'canva_composed', 'Canva', `${conn.extra_name} · ${saved.width}×${saved.height}`);
+      return true;
+    } catch (err) {
+      await addEvent(post.id, 'canva_failed', 'Canva', err.message);
+      return false;
+    }
+  }
+
+  /**
+   * Make or update the post's creative. With a Canva template: Gemini photo -> template -> export.
+   * Without one: a finished image from Gemini. `editNote` changes the picture; `textChanged` only re-fills the text.
+   */
+  async function makeCreative(post, ws, content, { editNote = '', textChanged = false } = {}) {
+    const conn = await canvaConnection(ws.id);
+    if (!conn) {
+      // Gemini drew the headline on the image, so only a headline change needs a new image.
+      if (!editNote && textChanged && post.content?.headline === content.headline) return true;
+      const note = editNote || (textChanged ? 'Update the headline text.' : '');
+      const previousId = note && post.image?.source === 'gemini' ? post.image.id : null;
+      return makeImage(post, ws, content, note ? { editNote: note, previousId } : {});
+    }
+    let photoId = post.photo_id;
+    if (!photoId || editNote || (!textChanged && !editNote && post.image)) {
+      const made = await makePhoto(post, ws, content, conn, { editNote });
+      if (made) photoId = made;
+      else if (!photoId) return false;
+    }
+    return composeCanva({ ...post, photo_id: photoId }, ws, content, conn, photoId);
+  }
+
+  /** The design was edited by hand in Canva: export it again and use it as the post's image. */
+  async function importFromCanva(postId, actor) {
+    const post = await getPost(postId);
+    if (!post?.canva_design_id) throw new ReviewError('This post has no Canva design.');
+    if (!['in_review', 'approved', 'scheduled', 'publish_failed'].includes(post.status)) throw new ReviewError('The image can no longer be changed for this post.');
+    const row = await db.get(`SELECT * FROM connections WHERE workspace_id = ? AND platform = 'canva'`, [post.workspace_id]);
+    if (!row) throw new ReviewError('This brand is no longer connected to Canva.');
+    try {
+      const saved = await media.saveAny(post.id, await canva.exportJpg(await canvaToken(row), post.canva_design_id), 'canva');
+      await db.run('UPDATE posts SET image_id = ?, updated_at = ? WHERE id = ?', [saved.id, now(), post.id]);
+      if (post.image_id) await db.run('DELETE FROM media WHERE id = ?', [post.image_id]);
+      await addEvent(post.id, 'canva_imported', actor, `${saved.width}×${saved.height}`);
+    } catch (err) { throw new ReviewError(err.message); }
+    await refreshSlackReview(await getPost(post.id));
   }
 
   /** Dashboard button: make a new image, or change the current one when a note is given. */
@@ -169,11 +278,13 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
     if (!(await settings.has('gemini_api_key'))) throw new ReviewError('Add the Gemini API key under Settings first.');
     const ws = await getBrand(post.workspace_id);
     note = String(note || '').trim();
-    const edit = note && post.image?.source === 'gemini';
+    const machineMade = ['gemini', 'canva'].includes(post.image?.source) || (!post.image && post.photo);
+    const edit = note && machineMade;
     const content = note && !edit ? { ...post.content, image_prompt: `${post.content.image_prompt}\n${note}` } : post.content;
-    const ok = await makeImage(post, ws, content, edit ? { editNote: note, previousId: post.image.id } : {});
+    const before = await db.get(`SELECT MAX(id) AS id FROM post_events WHERE post_id = ?`, [post.id]);
+    const ok = await makeCreative(post, ws, content, edit ? { editNote: note } : {});
     if (!ok) {
-      const last = await db.get(`SELECT note FROM post_events WHERE post_id = ? AND kind = 'image_failed' ORDER BY id DESC LIMIT 1`, [post.id]);
+      const last = await db.get(`SELECT note FROM post_events WHERE post_id = ? AND id > ? AND kind IN ('image_failed', 'canva_failed') ORDER BY id DESC LIMIT 1`, [post.id, before?.id || 0]);
       throw new ReviewError(last?.note || 'The image could not be generated.');
     }
     await refreshSlackReview(await getPost(post.id));
@@ -240,11 +351,15 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
     const version = post.version + 1;
 
     // Image: make one if the post has none; on a revision, change it only if the reviewer asked.
+    const textOnImageChanged = post.content && (post.content.headline !== result.content.headline || post.content.cta !== result.content.cta);
     if (!post.image) {
-      await makeImage(post, ws, result.content);
-    } else if (payload.note && (result.regenerateImage || post.content?.headline !== result.content.headline)) {
-      if (post.image.source === 'gemini') await makeImage(post, ws, result.content, { editNote: payload.note, previousId: post.image.id });
-      else if (result.regenerateImage) await addEvent(post.id, 'image_kept', 'System', 'The image was uploaded by hand, so it was not changed. Replace it if it needs to change.');
+      await makeCreative(post, ws, result.content);
+    } else if (payload.note && (result.regenerateImage || textOnImageChanged)) {
+      if (['gemini', 'canva'].includes(post.image.source)) {
+        await makeCreative(post, ws, result.content, result.regenerateImage ? { editNote: payload.note } : { textChanged: true });
+      } else if (result.regenerateImage) {
+        await addEvent(post.id, 'image_kept', 'System', 'The image was uploaded by hand, so it was not changed. Replace it if it needs to change.');
+      }
     }
 
     const updated = await db.run(
@@ -518,6 +633,6 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
   return {
     getPost, createPost, approve, reject, requestChanges, retry, retryPublish,
     setImage, removeImage, publishResults, drain, kick, addEvent, media, meta,
-    generateImageNow, intake, setLogo,
+    generateImageNow, intake, setLogo, importFromCanva, canva, canvaToken,
   };
 }
