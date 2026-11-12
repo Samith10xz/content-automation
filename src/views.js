@@ -1,4 +1,5 @@
-import { esc, formatTime, PLATFORMS, STATUS_LABELS, MAX_VERSIONS } from './util.js';
+import { esc, formatTime, PLATFORMS, STATUS_LABELS, MAX_VERSIONS, PUBLISHABLE } from './util.js';
+import { instagramProblem } from './media.js';
 
 const FONTS = 'https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap';
 
@@ -14,6 +15,7 @@ ${refresh ? `<meta http-equiv="refresh" content="${Number(refresh)}">` : ''}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="${FONTS}">
 <link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
 </head>
 <body>
 ${body}
@@ -135,7 +137,29 @@ ${brands.length ? `<div class="tbl"><table><thead><tr><th>Brand</th><th>Colours<
     : `<div class="card empty"><h2>No brands yet</h2><p class="muted">Add one for each business you create content for.</p></div>`}`;
 }
 
-export function brandFormBody({ brand, csrf, err, slackReady }) {
+function connectionsCard({ brand, csrf, metaReady, connection }) {
+  if (!brand.id) return '';
+  let body;
+  if (connection) {
+    body = `<p>Facebook Page: <strong>${esc(connection.account_name)}</strong></p>
+  <p>Instagram: ${connection.extra_name ? `<strong>@${esc(connection.extra_name)}</strong>` : '<span class="muted">No Instagram business account is linked to this Page. Link one in Instagram settings, then reconnect.</span>'}</p>
+  <p class="muted">Connected by ${esc(connection.connected_by)}.</p>
+  <div class="row"><a class="btn" href="/brands/${brand.id}/connect/meta">Reconnect</a>
+  <form method="post" action="/brands/${brand.id}/disconnect/meta">${csrfField(csrf)}<button class="btn bad" type="submit">Disconnect</button></form></div>`;
+  } else if (metaReady) {
+    body = `<p class="muted">Connect the brand’s Facebook Page. Its linked Instagram business account is connected at the same time. Facebook asks you to choose the Page and confirm the permissions.</p>
+  <div><a class="btn primary" href="/brands/${brand.id}/connect/meta">Connect Facebook and Instagram</a></div>`;
+  } else {
+    body = '<p class="muted">Add the Meta app ID and secret in <a href="/settings">Settings</a> first.</p>';
+  }
+  return `<div class="card">
+  <div class="row spread"><h2>Social accounts</h2>${connection ? '<span class="pill approved">Connected</span>' : '<span class="pill">Not connected</span>'}</div>
+  ${body}
+  <p class="muted">LinkedIn, TikTok and X are not connected yet. Posts for them are kept but not published.</p>
+</div>`;
+}
+
+export function brandFormBody({ brand, csrf, err, slackReady, metaReady, connection }) {
   const b = brand;
   const isNew = !b.id;
   return `<p><a href="/brands">← Brands</a></p>
@@ -160,6 +184,19 @@ ${notice('bad', err)}
   <label for="slack_channel">Slack approval channel ID <small>${slackReady ? 'Example: C0123ABCD. Find it in Slack under the channel name → About. Invite the app to that channel. Leave empty to review in the dashboard only.' : 'Connect Slack in Settings first. Until then posts are reviewed in the dashboard.'}</small>
     <input id="slack_channel" name="slack_channel" type="text" value="${esc(b.slack_channel)}" maxlength="30" placeholder="C0123ABCD"></label>
   <div class="row"><button class="btn primary" type="submit">${isNew ? 'Add brand' : 'Save changes'}</button></div>
+</form>
+${connectionsCard({ brand: b, csrf, metaReady, connection })}`;
+}
+
+export function pickPageBody({ brand, pages, state, csrf }) {
+  return `<p><a href="/brands/${brand.id}">← ${esc(brand.name)}</a></p>
+<h1>Choose the Facebook Page for ${esc(brand.name)}</h1>
+<form class="card" method="post" action="/brands/${brand.id}/connect/meta/pick">
+  ${csrfField(csrf)}
+  <input type="hidden" name="state" value="${esc(state)}">
+  <div class="pages">${pages.map((p, i) => `<label for="page_${i}"><input id="page_${i}" type="radio" name="page_id" value="${esc(p.id)}"${i === 0 ? ' checked' : ''}>
+    <span><strong>${esc(p.name)}</strong><br><span class="muted">${p.igUsername ? `Instagram @${esc(p.igUsername)}` : 'No Instagram business account linked'}</span></span></label>`).join('')}</div>
+  <div><button class="btn primary" type="submit">Connect this Page</button></div>
 </form>`;
 }
 
@@ -197,16 +234,65 @@ const EVENT_LABELS = {
   created: 'Brief submitted', generated: 'Content written', slack_sent: 'Sent to Slack for review',
   slack_failed: 'Slack message failed', approved: 'Approved', rejected: 'Rejected',
   changes_requested: 'Changes requested', failed: 'Failed', retried: 'Retried',
+  image_added: 'Image added', image_removed: 'Image removed', published: 'Published',
+  publish_failed: 'Publishing failed', publish_retried: 'Publishing retried',
 };
 
-export function postBody({ post, brand, events, csrf }) {
+const RESULT_LABELS = { pending: 'Waiting', published: 'Published', failed: 'Failed', skipped: 'Not connected' };
+const RESULT_PILL = { pending: 'publishing', published: 'published', failed: 'failed', skipped: '' };
+
+function imageCard({ post, brand, csrf }) {
+  const c = post.content;
+  const canEdit = ['generating', 'in_review', 'approved', 'scheduled', 'publish_failed', 'failed'].includes(post.status);
+  const igWarning = post.platforms.includes('instagram') ? instagramProblem(post.image) : '';
+  const upload = canEdit ? `<form class="stack" method="post" action="/posts/${post.id}/image" data-upload data-csrf="${esc(csrf)}">
+      <label for="image_file">${post.image ? 'Replace the image' : 'Upload the image'} <small>JPG only, up to 8 MB. From Canva: Share → Download → JPG. For Instagram use 1080×1080 or 1080×1350.</small>
+        <input id="image_file" type="file" accept="image/jpeg"></label>
+      <div class="row"><button class="btn primary" type="submit">Upload</button><span class="muted" data-status role="status"></span></div>
+    </form>` : '';
+  const remove = post.image && canEdit
+    ? `<form method="post" action="/posts/${post.id}/image/remove">${csrfField(csrf)}<button class="btn link" type="submit">Remove image</button></form>` : '';
+  const shown = post.image
+    ? `<img class="post-image" src="${esc(post.image.url)}" alt="${esc(c?.headline || 'Post image')}" width="${post.image.width}" height="${post.image.height}">
+      <p class="muted">${post.image.width}×${post.image.height} · ${Math.round(post.image.size / 1024)} KB</p>`
+    : c ? `<div class="preview" style="background:${esc(brand.primary_color)};color:${textOn(brand.primary_color)}"><span class="ph">${esc(c.headline)}</span><span class="pb">${esc(brand.name)}</span></div>
+      <p class="muted">Layout sketch only. This is not published.</p>` : '';
+  return `<div class="card"><h2>Image</h2>
+    ${igWarning && canEdit ? `<div class="notice warn">${esc(igWarning)}</div>` : ''}
+    ${shown}${remove}${upload}
+    ${c?.image_prompt ? `<div class="caption"><h3>Image idea from Claude</h3><p>${esc(c.image_prompt)}</p></div>` : ''}
+  </div>`;
+}
+
+function publishingCard({ post, results, connection, csrf }) {
+  if (!results.length) {
+    if (!['in_review', 'approved'].includes(post.status)) return '';
+    const unsupported = post.platforms.filter((p) => !PUBLISHABLE.includes(p));
+    return `<div class="card"><h2>Publishing</h2>
+      <p>${connection ? `Goes to the <strong>${esc(connection.account_name)}</strong> Facebook Page${connection.extra_name ? ` and Instagram <strong>@${esc(connection.extra_name)}</strong>` : ''} when approved.` : 'This brand is not connected to Facebook or Instagram yet, so approving will not publish anything. Connect it on the brand page.'}</p>
+      ${unsupported.length ? `<p class="muted">${unsupported.map((p) => esc(PLATFORMS[p].label)).join(', ')}: not connected yet, will be skipped.</p>` : ''}
+    </div>`;
+  }
+  const rows = results.map((r) => `<li><span><strong>${esc(PLATFORMS[r.platform]?.label || r.platform)}</strong>${r.url ? ` · <a href="${esc(r.url)}" target="_blank" rel="noopener">View post</a>` : ''}</span>
+    <span class="pill ${RESULT_PILL[r.status] || ''}">${esc(RESULT_LABELS[r.status] || r.status)}</span>
+    ${r.error && r.status !== 'published' ? `<span class="err">${esc(r.error)}</span>` : ''}</li>`).join('');
+  const retry = post.status === 'publish_failed'
+    ? `<form method="post" action="/posts/${post.id}/publish/retry">${csrfField(csrf)}<button class="btn" type="submit">Retry failed platforms</button></form>` : '';
+  return `<div class="card"><h2>Publishing</h2><ul class="results">${rows}</ul>${retry}</div>`;
+}
+
+export function postBody({ post, brand, events, results = [], connection = null, csrf }) {
   const c = post.content;
   const tz = brand.timezone;
   const state = {
     generating: notice('info', post.version ? 'Claude is rewriting this post with the requested changes. This page refreshes by itself.' : 'Claude is writing this post. This page refreshes by itself.'),
     failed: `<div class="notice bad"><strong>This post could not be written.</strong> ${esc(post.error)}
       <form method="post" action="/posts/${post.id}/retry" style="margin-top:10px">${csrfField(csrf)}<button class="btn" type="submit">Try again</button></form></div>`,
-    approved: notice('ok', `Approved by ${post.decided_by} on ${formatTime(post.decided_at, tz)}. Publishing to social platforms is not connected yet, so nothing has been posted.`),
+    approved: notice('ok', `Approved by ${post.decided_by} on ${formatTime(post.decided_at, tz)}. This post was approved before publishing was set up, so it was not published.`),
+    scheduled: notice('info', `Approved by ${post.decided_by}. Publishes ${formatTime(post.publish_at, tz)}.`),
+    publishing: notice('info', 'Publishing now. This page refreshes by itself.'),
+    published: notice('ok', `Approved by ${post.decided_by} and published.`),
+    publish_failed: notice('bad', 'Publishing did not finish on every platform. See Publishing below.'),
     rejected: notice('bad', `Rejected by ${post.decided_by} on ${formatTime(post.decided_at, tz)}.`),
   }[post.status] || '';
 
@@ -253,10 +339,7 @@ ${state}
   </div>
   <div class="stack" style="gap:24px">
     ${review}
-    ${c ? `<div class="card"><h2>Image</h2>
-      <div class="preview" style="background:${esc(brand.primary_color)};color:${textOn(brand.primary_color)}"><span class="ph">${esc(c.headline)}</span><span class="pb">${esc(brand.name)}</span></div>
-      <p class="muted">Layout sketch in the brand colour. Image generation is not connected yet.</p>
-      <div class="caption"><h3>Image prompt</h3><p>${esc(c.image_prompt)}</p></div></div>` : ''}
+    ${results.length ? publishingCard({ post, results, connection, csrf }) + imageCard({ post, brand, csrf }) : imageCard({ post, brand, csrf }) + publishingCard({ post, results, connection, csrf })}
     <div class="card"><h2>Activity</h2><ul class="timeline">${timeline}</ul></div>
   </div>
 </div>`;
@@ -288,9 +371,57 @@ export function settingsBody({ csrf, state, appUrl }) {
     ${state.slackToken ? `<button class="btn" type="submit" formaction="/settings/slack/test">Save and test</button>` : ''}</div>
   <p class="muted">Then set each brand’s Slack channel ID on its brand page.</p>
 </form>
+<form class="card" method="post" action="/settings/meta">
+  ${csrfField(csrf)}
+  <div class="row spread"><h2>Facebook and Instagram</h2>${saved(state.metaAppId && state.metaSecret)}</div>
+  <p class="muted">Create a Meta app at developers.facebook.com, add Facebook Login for Business, and add this as a Valid OAuth Redirect URI:</p>
+  <p class="mono" style="overflow-wrap:anywhere">${esc(state.metaRedirect)}</p>
+  <p class="muted">Privacy policy URL: <span class="mono">${esc(appUrl)}/privacy</span> · Data deletion URL: <span class="mono">${esc(appUrl)}/data-deletion</span></p>
+  <label for="meta_app_id">App ID<input id="meta_app_id" name="meta_app_id" type="text" inputmode="numeric" value="${esc(state.metaAppId)}" maxlength="25"></label>
+  <label for="meta_app_secret">App secret <small>${state.metaSecret ? 'Saved. Enter a new one only to replace it.' : 'App settings → Basic → App secret'}</small>
+    <input id="meta_app_secret" name="meta_app_secret" type="password" autocomplete="off" placeholder="${state.metaSecret ? '••••••••' : ''}"></label>
+  <label for="meta_config_id">Login configuration ID <small>Optional. Only if your Facebook Login for Business setup gave you one.</small>
+    <input id="meta_config_id" name="meta_config_id" type="text" inputmode="numeric" value="${esc(state.metaConfigId)}" maxlength="25"></label>
+  <div class="row"><button class="btn primary" type="submit">Save</button></div>
+  <p class="muted">Then connect each brand on its brand page.</p>
+</form>
 <div class="card">
   <h2>System</h2>
   <p>Background check: ${state.lastTick ? `last ran ${esc(formatTime(state.lastTick))}` : '<span class="muted">has not run yet</span>'}</p>
   <p class="muted">A scheduled call runs every minute to retry failed steps. Posts still start writing the moment a brief is submitted.</p>
 </div>`;
+}
+
+export function privacyPage({ appUrl }) {
+  return page({
+    title: 'Privacy policy',
+    body: `<main class="legal">
+<h1>Privacy policy</h1>
+<p class="muted">Content Pipeline · ${esc(appUrl)}</p>
+<p>Content Pipeline is a private tool used by our team to write, approve and publish social media posts for the brands we manage. It is not open to the public.</p>
+<h2>What we access</h2>
+<p>When a brand connects its Facebook Page and Instagram business account, we receive an access token from Meta, the Page name and ID, and the Instagram account name and ID. We use them only to publish posts that our team has approved, to that brand’s own Page and Instagram account.</p>
+<h2>What we store</h2>
+<p>We store the access token encrypted, the post text and images our team creates, and a record of who approved each post. We do not collect information about people who follow or interact with the Page.</p>
+<h2>Sharing</h2>
+<p>We do not sell or share this information. Post text is sent to Anthropic to draft captions, and review messages are sent to the brand’s Slack workspace.</p>
+<h2>Deleting your data</h2>
+<p>A brand can disconnect at any time from its brand page, which deletes the stored token immediately. See <a href="/data-deletion">data deletion</a>.</p>
+</main>`,
+  });
+}
+
+export function dataDeletionPage() {
+  return page({
+    title: 'Data deletion',
+    body: `<main class="legal">
+<h1>Data deletion</h1>
+<p>To delete the data Content Pipeline holds for a Facebook Page or Instagram account:</p>
+<ol>
+<li>Remove the app in Facebook: Settings → Business integrations → select Content Pipeline → Remove.</li>
+<li>Ask the agency team that manages your account to disconnect the brand in Content Pipeline. Disconnecting deletes the stored access token immediately.</li>
+</ol>
+<p>Posts already published to Facebook or Instagram stay on those platforms and can be deleted there.</p>
+</main>`,
+  });
 }

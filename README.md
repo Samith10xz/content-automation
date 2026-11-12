@@ -13,7 +13,7 @@ Node.js 22, MySQL, no build step. Runs on Hostinger Cloud hosting (entry file `s
 ## Not built yet
 
 - Image generation and brand overlay
-- Publishing to Facebook, Instagram, LinkedIn, TikTok, X
+- Publishing to LinkedIn, TikTok, X; AI image generation; Canva import
 - WhatsApp approval, client logins, the drag-and-drop workflow builder
 
 ## Run locally
@@ -25,3 +25,13 @@ Node.js 22, MySQL, no build step. Runs on Hostinger Cloud hosting (entry file `s
 ## Configuration
 
 See `.env.example`. API keys for Claude and Slack are entered in the app under Settings and stored encrypted.
+
+## Publishing (Facebook and Instagram)
+
+1. Settings → Facebook and Instagram: Meta app ID and secret. Add the redirect URI shown there to the Meta app.
+2. Each brand page → Connect Facebook and Instagram → choose the Page.
+3. Posts with Instagram need a JPG image (Canva: Share → Download → JPG, 1080×1080 or 1080×1350) before approval.
+4. Approving publishes now, or at the brief's publish time. Results and links appear on the post and in the Slack thread.
+
+A Meta app in Development mode publishes posts only people with a role on the app can see. Switch the app to Live
+(using /privacy and /data-deletion) for public posts. LinkedIn, TikTok and X are recorded as skipped.

@@ -42,8 +42,8 @@ export async function openDb(cfg) {
 }
 
 const TYPES = {
-  sqlite: { PK: 'INTEGER PRIMARY KEY AUTOINCREMENT', TEXT: 'TEXT', DT: 'VARCHAR(19)', END: '' },
-  mysql: { PK: 'BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY', TEXT: 'LONGTEXT', DT: 'DATETIME', END: ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' },
+  sqlite: { PK: 'INTEGER PRIMARY KEY AUTOINCREMENT', TEXT: 'TEXT', DT: 'VARCHAR(19)', BLOB: 'BLOB', END: '' },
+  mysql: { PK: 'BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY', TEXT: 'LONGTEXT', DT: 'DATETIME', BLOB: 'LONGBLOB', END: ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci' },
 };
 
 /** Run each numbered migration once. Statements use {{PK}}, {{TEXT}}, {{DT}}, {{END}} placeholders. */
@@ -60,7 +60,7 @@ export async function migrate(db) {
         await db.run(render(sql));
       } catch (err) {
         // A half-applied migration is re-run safely: skip indexes that already exist.
-        if (!/already exists|Duplicate key name/i.test(err.message)) throw err;
+        if (!/already exists|Duplicate key name|duplicate column/i.test(err.message)) throw err;
       }
     }
     await db.run('INSERT INTO migrations (version, applied_at) VALUES (?, ?)',

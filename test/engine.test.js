@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { makeApp, addBrand } from './helpers.js';
+import { makeApp, addBrand, makeJpeg, connectMeta } from './helpers.js';
 import { hashPassword, verifyPassword, encrypt, decrypt } from '../src/security.js';
 import { localToUtc, MAX_VERSIONS } from '../src/util.js';
 import { verifySlackSignature } from '../src/services/slack.js';
@@ -10,7 +10,8 @@ const brief = { goal: 'Free pickup in December', details: 'UK parcels', language
 
 async function newPost(ctx, over = {}) {
   const ws = over.ws ?? await addBrand(ctx.db, over.brand);
-  const id = await ctx.app.engine.createPost({ workspaceId: ws, actor: 'Sam', brief, platforms: ['instagram', 'x'], publishAt: null });
+  const id = await ctx.app.engine.createPost({ workspaceId: ws, actor: 'Sam', brief, platforms: over.platforms || ['instagram', 'x'], publishAt: over.publishAt || null });
+  if (over.image !== false) await ctx.app.engine.setImage(id, makeJpeg(1080, 1350), 'Sam');
   return id;
 }
 
@@ -94,7 +95,7 @@ test('approve works once; a second decision is refused', async () => {
   const id = await newPost(ctx);
   await ctx.app.engine.drain();
   const post = await ctx.app.engine.approve(id, 'Sam');
-  assert.equal(post.status, 'approved');
+  assert.equal(post.status, 'publishing');
   assert.equal(post.decided_by, 'Sam');
   await assert.rejects(() => ctx.app.engine.reject(id, 'Other'), /no longer waiting/);
   await assert.rejects(() => ctx.app.engine.requestChanges(id, 'Other', 'x'), /no longer waiting/);

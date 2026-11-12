@@ -30,17 +30,22 @@ export function parseCookies(header = '') {
   return out;
 }
 
-export function readBody(req, limit = 1_000_000) {
+export function readBuffer(req, limit = 1_000_000) {
   return new Promise((resolve, reject) => {
-    const chunks = []; let size = 0;
+    const chunks = []; let size = 0; let done = false;
     req.on('data', (c) => {
+      if (done) return;
       size += c.length;
-      if (size > limit) { reject(Object.assign(new Error('Request too large'), { status: 413 })); req.destroy(); return; }
+      if (size > limit) { done = true; reject(Object.assign(new Error('Request too large'), { status: 413 })); req.resume(); return; }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => { if (!done) { done = true; resolve(Buffer.concat(chunks)); } });
+    req.on('error', (e) => { if (!done) { done = true; reject(e); } });
   });
+}
+
+export async function readBody(req, limit = 1_000_000) {
+  return (await readBuffer(req, limit)).toString('utf8');
 }
 
 export function parseForm(raw, contentType = '') {

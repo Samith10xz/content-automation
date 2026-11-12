@@ -81,3 +81,14 @@ td a{font-weight:600;text-decoration:none}
 .timeline .note{color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere}
 .swatch{display:inline-block;width:14px;height:14px;border-radius:4px;border:1px solid var(--line);vertical-align:-2px}
 details summary{cursor:pointer;font-weight:600}
+.pill.scheduled,.pill.publishing{background:var(--accent-soft);color:var(--accent)}
+.pill.publish_failed{background:var(--bad-soft);color:var(--bad)}
+.post-image{max-width:100%;width:320px;height:auto;border-radius:10px;border:1px solid var(--line);display:block}
+.results{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.results li{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.results .err{color:var(--muted);font-size:13.5px;flex-basis:100%;overflow-wrap:anywhere}
+.pages{display:flex;flex-direction:column;gap:10px}
+.pages label{flex-direction:row;align-items:flex-start;gap:10px;border:1px solid var(--line);border-radius:8px;padding:12px;font-weight:500;cursor:pointer}
+.legal{max-width:720px;margin:6vh auto;padding:0 20px 64px;display:flex;flex-direction:column;gap:14px}
+.legal p,.legal li{max-width:68ch}
+input[type=file]{font:inherit;max-width:100%}

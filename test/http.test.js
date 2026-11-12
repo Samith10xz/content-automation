@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { makeApp, serve, csrfOf, slackSign, addBrand } from './helpers.js';
+import { makeApp, serve, csrfOf, slackSign, addBrand, makeJpeg } from './helpers.js';
 
 async function signedIn() {
   const ctx = await makeApp();
@@ -98,12 +98,18 @@ test('brand, brief, review and approval through the pages', async () => {
     assert.match((await s.web.post('/posts/1/changes', { _csrf: s.csrf, note: 'Shorter' })).location, /Changes%20requested/);
     await s.app.engine.drain();
     assert.match((await s.web.get('/posts/1')).text, /version 2/);
+    // Instagram needs an image before approval
+    assert.match((await s.web.post('/posts/1/approve', { _csrf: s.csrf })).location, /err=Instagram%20needs%20an%20image/);
+    const up = await s.web.raw('POST', '/posts/1/image', makeJpeg(1080, 1080), { 'content-type': 'image/jpeg', 'x-csrf-token': s.csrf });
+    assert.equal(up.status, 200, up.text);
+    const page = await s.web.get('/posts/1');
+    const src = /<img class="post-image" src="http:\/\/localhost(\/media\/[a-f0-9]{48}\.jpg)"/.exec(page.text);
+    assert.ok(src, 'image shown on the post page');
     assert.match((await s.web.post('/posts/1/approve', { _csrf: s.csrf })).location, /msg=Post%20approved/);
     const done = await s.web.get('/posts/1');
-    assert.match(done.text, /Approved by Sam/);
-    assert.match(done.text, /nothing has been posted/);
+    assert.match(done.text, /Publishing now/);
     assert.match((await s.web.post('/posts/1/approve', { _csrf: s.csrf })).location, /err=.*no%20longer%20waiting/);
-    assert.match((await s.web.get('/?status=approved')).text, /Shorter headline/);
+    assert.match((await s.web.get('/?status=publishing')).text, /Shorter headline/);
     assert.equal((await s.web.get('/posts/999')).status, 404);
   } finally { await s.web.close(); }
 });
@@ -127,7 +133,7 @@ test('Slack buttons: signed approve works, unsigned is refused, changes opens th
     assert.equal((await send({ type: 'block_actions', user, actions: [{ action_id: 'approve', value: String(a) }] })).status, 200);
     await new Promise((r) => setTimeout(r, 50)); // the work finishes just after Slack gets its answer
     const post = await s.app.engine.getPost(a);
-    assert.equal(post.status, 'approved'); assert.equal(post.decided_by, 'nimal (Slack)');
+    assert.equal(post.status, 'publishing'); assert.equal(post.decided_by, 'nimal (Slack)');
 
     const b = await mk();
     await send({ type: 'block_actions', user, trigger_id: 'trig', actions: [{ action_id: 'changes', value: String(b) }] });

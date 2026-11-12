@@ -8,14 +8,19 @@ export const PLATFORMS = {
   x: { label: 'X', limit: 280 },
 };
 
+// Platforms the app can publish to today. The others are recorded as skipped on approval.
+export const PUBLISHABLE = ['facebook', 'instagram'];
+
 export const STATUS_LABELS = {
   generating: 'Generating',
   in_review: 'In review',
   approved: 'Approved',
+  scheduled: 'Scheduled',
+  publishing: 'Publishing',
+  published: 'Published',
+  publish_failed: 'Publish failed',
   rejected: 'Rejected',
   failed: 'Failed',
-  scheduled: 'Scheduled',
-  published: 'Published',
 };
 
 export const MAX_VERSIONS = 4; // first draft + 3 rounds of changes

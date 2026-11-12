@@ -91,4 +91,51 @@ export const migrations = [
     ){{END}}`,
     `CREATE INDEX idx_usage_ws ON usage_log (workspace_id, created_at)`,
   ],
+  [
+    `CREATE TABLE IF NOT EXISTS media (
+      id {{PK}},
+      post_id BIGINT NOT NULL,
+      token VARCHAR(64) NOT NULL UNIQUE,
+      mime VARCHAR(40) NOT NULL,
+      width INT NOT NULL,
+      height INT NOT NULL,
+      size INT NOT NULL,
+      data {{BLOB}} NOT NULL,
+      created_at {{DT}} NOT NULL
+    ){{END}}`,
+    `ALTER TABLE posts ADD COLUMN image_id BIGINT NULL`,
+    `CREATE TABLE IF NOT EXISTS connections (
+      id {{PK}},
+      workspace_id BIGINT NOT NULL,
+      platform VARCHAR(20) NOT NULL,
+      account_id VARCHAR(64) NOT NULL,
+      account_name VARCHAR(191) NOT NULL,
+      extra_id VARCHAR(64) NULL,
+      extra_name VARCHAR(191) NULL,
+      token {{TEXT}} NOT NULL,
+      connected_by VARCHAR(191) NOT NULL,
+      created_at {{DT}} NOT NULL,
+      updated_at {{DT}} NOT NULL
+    ){{END}}`,
+    `CREATE UNIQUE INDEX idx_conn_ws ON connections (workspace_id, platform)`,
+    `CREATE TABLE IF NOT EXISTS publish_results (
+      id {{PK}},
+      post_id BIGINT NOT NULL,
+      platform VARCHAR(20) NOT NULL,
+      status VARCHAR(20) NOT NULL,
+      remote_id VARCHAR(100) NULL,
+      url VARCHAR(500) NULL,
+      container_id VARCHAR(100) NULL,
+      error {{TEXT}},
+      updated_at {{DT}} NOT NULL
+    ){{END}}`,
+    `CREATE INDEX idx_results_post ON publish_results (post_id)`,
+    `CREATE TABLE IF NOT EXISTS oauth_states (
+      state VARCHAR(64) PRIMARY KEY,
+      user_id BIGINT NOT NULL,
+      workspace_id BIGINT NOT NULL,
+      data {{TEXT}},
+      created_at {{DT}} NOT NULL
+    ){{END}}`,
+  ],
 ];

@@ -25,10 +25,14 @@ const clip = (text, max) => (text.length > max ? text.slice(0, max - 1) + '…' 
 
 function summaryBlocks(post, ws, appUrl) {
   const c = post.content;
+  const image = post.image
+    ? [{ type: 'image', image_url: post.image.url, alt_text: clip(c.headline || 'Post image', 1900) }]
+    : [{ type: 'context', elements: [{ type: 'mrkdwn', text: post.platforms.includes('instagram') ? ':frame_with_picture: No image yet. Instagram needs one: add it in the dashboard before approving.' : ':frame_with_picture: No image yet.' }] }];
   const captions = post.platforms.map((p) => `*${PLATFORMS[p].label}*\n${clip(c.captions[p] || '', 600)}`).join('\n\n');
   const when = post.publish_at ? `scheduled ${formatTime(post.publish_at, ws.timezone)}` : 'publish when approved';
   return [
     { type: 'section', text: { type: 'mrkdwn', text: `*Post ready for review* · ${ws.name} · ${when}\nVersion ${post.version} · <${appUrl}/posts/${post.id}|Open in dashboard>` } },
+    ...image,
     { type: 'section', text: { type: 'mrkdwn', text: clip(`*Headline:* ${c.headline}\n*Image idea:* ${c.image_prompt}`, 2900) } },
     { type: 'section', text: { type: 'mrkdwn', text: clip(captions, 2900) } },
     { type: 'context', elements: [{ type: 'mrkdwn', text: clip(c.hashtags.map((h) => `#${h}`).join(' ') || 'No hashtags', 2900) }] },
@@ -58,6 +62,10 @@ export function createSlack({ fetchImpl = fetch } = {}) {
   return {
     postReview: (token, channel, post, ws, appUrl) =>
       call('chat.postMessage', token, { channel, text: `Post ready for review: ${post.content.headline}`, blocks: reviewBlocks(post, ws, appUrl) }, fetchImpl),
+    updateReview: (token, post, ws, appUrl) =>
+      call('chat.update', token, { channel: post.slack_channel, ts: post.slack_ts, text: `Post ready for review: ${post.content.headline}`, blocks: reviewBlocks(post, ws, appUrl) }, fetchImpl),
+    postThread: (token, channel, threadTs, text) =>
+      call('chat.postMessage', token, { channel, thread_ts: threadTs, text, unfurl_links: false }, fetchImpl),
     markDecided: (token, post, ws, appUrl, line) =>
       call('chat.update', token, { channel: post.slack_channel, ts: post.slack_ts, text: line, blocks: decidedBlocks(post, ws, appUrl, line) }, fetchImpl),
     openChangesModal: (token, triggerId, postId) =>
