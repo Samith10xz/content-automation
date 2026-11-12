@@ -16,15 +16,25 @@ export function fakeFetch(state) {
       if (!body.tools) return json(200, { model: body.model, content: [{ type: 'text', text: 'OK' }] });
       const platforms = body.tools[0].input_schema.properties.captions.required;
       const revision = body.messages[0].content.includes('This is a revision');
+      const wantsImage = revision && /image|picture|background/i.test(body.messages[0].content.split('The reviewer asked for these changes:')[1] || '');
       return json(200, {
         model: body.model, usage: { input_tokens: 120, output_tokens: 80 },
         content: [{ type: 'tool_use', name: 'save_post', input: {
           headline: revision ? 'Shorter headline' : 'Free pickup this December',
           image_prompt: 'A courier handing over a parcel',
           captions: Object.fromEntries(platforms.map((p) => [p, `Caption for ${p}${revision ? ' v2' : ''}`])),
-          hashtags: ['#ParcelLK', 'shipping'], cta: 'Book now',
+          hashtags: ['#ParcelLK', 'shipping'], cta: 'Book now', regenerate_image: wantsImage,
         } }],
       });
+    }
+    if (url.includes('generativelanguage.googleapis.com')) {
+      if (url.includes('/models/')) return state.geminiStatus ? json(state.geminiStatus, { error: { message: 'API key not valid' } }) : json(200, { displayName: 'Nano Banana 2.1' });
+      if (state.geminiStatus) return json(state.geminiStatus, { error: { message: 'quota exceeded' } });
+      state.images++;
+      return json(200, { status: 'completed', steps: [
+        { type: 'thought', summary: [{ type: 'image', data: 'x'.repeat(400) }] },
+        { type: 'model_output', content: [{ type: 'image', mime_type: 'image/jpeg', data: makeJpeg(896 + state.images, 1120).toString('base64') }] },
+      ] });
     }
     if (url.includes('graph.facebook.com')) {
       const u = new URL(url);
@@ -51,7 +61,7 @@ export function fakeFetch(state) {
 
 export async function makeApp(env = {}) {
   const state = {
-    calls: [], claudeStatus: 0, slackFail: false, graph: [], metaFail: {}, igStatus: [],
+    calls: [], claudeStatus: 0, slackFail: false, graph: [], metaFail: {}, igStatus: [], geminiStatus: 0, images: 0,
     pages: [{ id: '111', name: 'Parcel.lk', access_token: 'page-token', instagram_business_account: { id: '999', username: 'parcel.lk' } }],
   };
   const config = loadConfig({ SECRET_KEY: 'a'.repeat(64), SETUP_TOKEN: 'setup-token', CRON_SECRET: 'cron-secret', APP_URL: 'http://localhost', ...env });
@@ -103,7 +113,7 @@ export function slackSign(secret, rawBody, ts = Math.floor(Date.now() / 1000)) {
 export function makeJpeg(width, height) {
   const sof = Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 255, width >> 8, width & 255, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
   const app0 = Buffer.from([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
-  return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, sof, Buffer.alloc(64, 0), Buffer.from([0xff, 0xd9])]);
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, sof, Buffer.alloc(400, 0), Buffer.from([0xff, 0xd9])]);
 }
 
 /** Connect a brand to the fake Facebook Page 111 / Instagram 999. */
@@ -113,4 +123,11 @@ export async function connectMeta(ctx, workspaceId) {
     `INSERT INTO connections (workspace_id, platform, account_id, account_name, extra_id, extra_name, token, connected_by, created_at, updated_at)
      VALUES (?, 'meta', '111', 'Parcel.lk', '999', 'parcel.lk', ?, 'Sam', '2026-01-01 00:00:00', '2026-01-01 00:00:00')`,
     [workspaceId, encrypt('page-token', ctx.config.secretKey)]);
+}
+
+export function makePng(width, height) {
+  const b = Buffer.alloc(64);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+  b.writeUInt32BE(13, 8); b.write('IHDR', 12); b.writeUInt32BE(width, 16); b.writeUInt32BE(height, 20);
+  return b;
 }

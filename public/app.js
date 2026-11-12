@@ -6,8 +6,9 @@ document.querySelectorAll('form[data-upload]').forEach((form) => {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const file = input.files[0];
-    if (!file) { status.textContent = 'Choose a JPG file first.'; return; }
-    if (file.size > 8 * 1024 * 1024) { status.textContent = 'That image is over 8 MB. Export it smaller and try again.'; return; }
+    if (!file) { status.textContent = 'Choose a file first.'; return; }
+    const maxMb = Number(form.dataset.maxMb || 8);
+    if (file.size > maxMb * 1024 * 1024) { status.textContent = `That file is over ${maxMb} MB. Export it smaller and try again.`; return; }
     button.disabled = true;
     status.textContent = 'Uploading…';
     try {

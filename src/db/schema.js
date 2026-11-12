@@ -138,4 +138,11 @@ export const migrations = [
       created_at {{DT}} NOT NULL
     ){{END}}`,
   ],
+  [
+    `ALTER TABLE workspaces ADD COLUMN slack_request_channel VARCHAR(64) NULL`,
+    `ALTER TABLE workspaces ADD COLUMN logo_id BIGINT NULL`,
+    `ALTER TABLE media ADD COLUMN source VARCHAR(20) NULL`,
+    `ALTER TABLE posts ADD COLUMN source_ref VARCHAR(100) NULL`,
+    `CREATE UNIQUE INDEX idx_posts_source ON posts (source_ref)`,
+  ],
 ];

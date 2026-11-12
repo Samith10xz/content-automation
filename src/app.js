@@ -7,6 +7,7 @@ import { hashPassword, verifyPassword, encrypt, decrypt } from './security.js';
 import { createSettings } from './settings.js';
 import { createSlack, verifySlackSignature } from './services/slack.js';
 import { DEFAULT_MODEL, testClaude } from './services/claude.js';
+import { DEFAULT_IMAGE_MODEL, testGemini } from './services/gemini.js';
 import { createEngine, ReviewError } from './engine.js';
 import * as views from './views.js';
 import { PLATFORMS, STATUS_LABELS, now, randomToken, safeEqual, parseJson, localToUtc, isValidTimeZone } from './util.js';
@@ -72,6 +73,7 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
       tone: text('tone', 2000), audience: text('audience', 2000),
       banned_words: text('banned_words', 1000), sample_posts: text('sample_posts', 6000),
       slack_channel: text('slack_channel', 30),
+      slack_request_channel: text('slack_request_channel', 30),
     };
   }
 
@@ -80,6 +82,8 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     if (!COLOR.test(b.primary_color) || !COLOR.test(b.secondary_color)) return 'Pick both brand colours.';
     if (!isValidTimeZone(b.timezone)) return 'That time zone is not recognised. Example: Asia/Colombo.';
     if (b.slack_channel && !/^[CG][A-Z0-9]{6,}$/.test(b.slack_channel)) return 'A Slack channel ID looks like C0123ABCD (not the channel name).';
+    if (b.slack_request_channel && !/^[CG][A-Z0-9]{6,}$/.test(b.slack_request_channel)) return 'A Slack channel ID looks like C0123ABCD (not the channel name).';
+    if (b.slack_request_channel && b.slack_request_channel === b.slack_channel) return 'Use two different Slack channels: one for requests and one for approvals.';
     return '';
   }
 
@@ -213,7 +217,7 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     const connection = await db.get(`SELECT account_name, extra_name FROM connections WHERE workspace_id = ? AND platform = 'meta'`, [brand.id]);
     render(ctx, {
       title: post.content?.headline || 'Post', active: 'posts', refresh: ['generating', 'publishing'].includes(post.status) ? 4 : 0,
-      body: views.postBody({ post, brand, events, results, connection, csrf: ctx.session.csrf }),
+      body: views.postBody({ post, brand, events, results, connection, csrf: ctx.session.csrf, geminiReady: await settings.has('gemini_api_key') }),
     });
   });
 
@@ -229,7 +233,7 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
   }, { raw: true });
 
   router.get('/media/:file', async (ctx) => {
-    const m = /^([a-f0-9]{48})\.jpg$/.exec(ctx.params.file);
+    const m = /^([a-f0-9]{48})\.(?:jpg|png)$/.exec(ctx.params.file);
     const file = m && await engine.media.read(m[1]);
     if (!file) return send(ctx.res, 404, 'Not found', { 'content-type': 'text/plain' });
     send(ctx.res, 200, file.data, { 'content-type': file.mime, 'cache-control': 'public, max-age=86400', 'content-length': String(file.data.length) });
@@ -249,6 +253,7 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
   router.post('/posts/:id/reject', reviewAction((ctx) => engine.reject(ctx.params.id, ctx.session.user.name, String(ctx.body.note || '').trim().slice(0, 500)), 'Post rejected.'));
   router.post('/posts/:id/changes', reviewAction((ctx) => engine.requestChanges(ctx.params.id, ctx.session.user.name, String(ctx.body.note || '').slice(0, 1500)), 'Changes requested. Claude is rewriting the post.'));
   router.post('/posts/:id/retry', reviewAction((ctx) => engine.retry(ctx.params.id, ctx.session.user.name), 'Trying again.'));
+  router.post('/posts/:id/image/generate', reviewAction((ctx) => engine.generateImageNow(ctx.params.id, ctx.session.user.name, String(ctx.body.note || '').slice(0, 1000)), 'Image generated.'));
   router.post('/posts/:id/image/remove', reviewAction((ctx) => engine.removeImage(ctx.params.id, ctx.session.user.name), 'Image removed.'));
   router.post('/posts/:id/publish/retry', reviewAction((ctx) => engine.retryPublish(ctx.params.id, ctx.session.user.name), 'Publishing again.'));
 
@@ -260,20 +265,26 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     render(ctx, { title: 'Brands', active: 'brands', body: views.brandsBody({ brands }) });
   });
 
-  const blankBrand = { name: '', timezone: 'Asia/Colombo', primary_color: '#2f43b8', secondary_color: '#f5b700', tone: '', audience: '', banned_words: '', sample_posts: '', slack_channel: '' };
+  const blankBrand = { name: '', timezone: 'Asia/Colombo', primary_color: '#2f43b8', secondary_color: '#f5b700', tone: '', audience: '', banned_words: '', sample_posts: '', slack_channel: '', slack_request_channel: '' };
 
   router.get('/brands/new', async (ctx) => {
     render(ctx, { title: 'Add a brand', active: 'brands', body: views.brandFormBody({ brand: blankBrand, csrf: ctx.session.csrf, slackReady: await settings.has('slack_bot_token') }) });
   });
 
+  async function requestChannelTaken(b) {
+    if (!b.slack_request_channel) return '';
+    const other = await db.get('SELECT id, name FROM workspaces WHERE slack_request_channel = ? AND id <> ?', [b.slack_request_channel, b.id || 0]);
+    return other ? `That request channel is already used by ${other.name}. Each brand needs its own.` : '';
+  }
+
   router.post('/brands', async (ctx) => {
     const b = brandFromForm(ctx.body);
-    const err = brandError(b);
+    const err = brandError(b) || await requestChannelTaken(b);
     if (err) return render(ctx, { title: 'Add a brand', active: 'brands', status: 400, body: views.brandFormBody({ brand: b, csrf: ctx.session.csrf, err, slackReady: await settings.has('slack_bot_token') }) });
     await db.run(
-      `INSERT INTO workspaces (name, timezone, primary_color, secondary_color, tone, audience, banned_words, sample_posts, slack_channel, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [b.name, b.timezone, b.primary_color, b.secondary_color, b.tone, b.audience, b.banned_words, b.sample_posts, b.slack_channel || null, now(), now()]);
+      `INSERT INTO workspaces (name, timezone, primary_color, secondary_color, tone, audience, banned_words, sample_posts, slack_channel, slack_request_channel, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [b.name, b.timezone, b.primary_color, b.secondary_color, b.tone, b.audience, b.banned_words, b.sample_posts, b.slack_channel || null, b.slack_request_channel || null, now(), now()]);
     redirect(ctx.res, withMsg('/brands', 'msg', `${b.name} added.`));
   });
 
@@ -281,7 +292,18 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     slackReady: await settings.has('slack_bot_token'),
     metaReady: (await settings.has('meta_app_id')) && (await settings.has('meta_app_secret')),
     connection: brand.id ? await db.get(`SELECT * FROM connections WHERE workspace_id = ? AND platform = 'meta'`, [brand.id]) : null,
+    logo: brand.id ? await engine.media.byId((await getBrand(brand.id))?.logo_id) : null,
   });
+
+  router.post('/brands/:id/logo', async (ctx) => {
+    try {
+      await engine.setLogo(ctx.params.id, ctx.rawBuffer);
+      sendJson(ctx.res, 200, { ok: true, redirect: withMsg(`/brands/${Number(ctx.params.id)}`, 'msg', 'Logo saved.') });
+    } catch (err) {
+      if (!(err instanceof ReviewError)) throw err;
+      sendJson(ctx.res, 400, { ok: false, error: err.message });
+    }
+  }, { raw: true });
 
   router.get('/brands/:id', async (ctx) => {
     const brand = await getBrand(ctx.params.id);
@@ -377,11 +399,11 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     const existing = await getBrand(ctx.params.id);
     if (!existing) return notFound(ctx);
     const b = brandFromForm(ctx.body, { id: existing.id });
-    const err = brandError(b);
+    const err = brandError(b) || await requestChannelTaken(b);
     if (err) return render(ctx, { title: existing.name, active: 'brands', status: 400, body: views.brandFormBody({ brand: b, csrf: ctx.session.csrf, err, ...(await brandExtras(existing)) }) });
     await db.run(
-      `UPDATE workspaces SET name = ?, timezone = ?, primary_color = ?, secondary_color = ?, tone = ?, audience = ?, banned_words = ?, sample_posts = ?, slack_channel = ?, updated_at = ? WHERE id = ?`,
-      [b.name, b.timezone, b.primary_color, b.secondary_color, b.tone, b.audience, b.banned_words, b.sample_posts, b.slack_channel || null, now(), existing.id]);
+      `UPDATE workspaces SET name = ?, timezone = ?, primary_color = ?, secondary_color = ?, tone = ?, audience = ?, banned_words = ?, sample_posts = ?, slack_channel = ?, slack_request_channel = ?, updated_at = ? WHERE id = ?`,
+      [b.name, b.timezone, b.primary_color, b.secondary_color, b.tone, b.audience, b.banned_words, b.sample_posts, b.slack_channel || null, b.slack_request_channel || null, now(), existing.id]);
     redirect(ctx.res, withMsg(`/brands/${existing.id}`, 'msg', 'Brand saved.'));
   });
 
@@ -398,6 +420,10 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
           slackToken: await settings.has('slack_bot_token'),
           slackSecret: await settings.has('slack_signing_secret'),
           lastTick: await settings.get('last_cron_tick'),
+          geminiKey: await settings.has('gemini_api_key'),
+          geminiModel: (await settings.get('gemini_model')) || DEFAULT_IMAGE_MODEL,
+          geminiSize: (await settings.get('gemini_image_size')) || '1K',
+          eventsUrl: `${config.appUrl}/api/slack/events`,
           metaAppId: await settings.get('meta_app_id'),
           metaSecret: await settings.has('meta_app_secret'),
           metaConfigId: await settings.get('meta_config_id'),
@@ -430,6 +456,22 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     const model = await testClaude({ apiKey: await settings.get('anthropic_api_key'), model: await settings.get('claude_model'), fetchImpl });
     return `Claude is connected (${model}).`;
   }));
+  async function saveGemini(ctx) {
+    const key = String(ctx.body.gemini_api_key || '').trim();
+    const model = String(ctx.body.gemini_model || '').trim();
+    const size = String(ctx.body.gemini_image_size || '1K');
+    if (!/^[a-zA-Z0-9.\-_]{3,80}$/.test(model)) throw new Error('That model name is not valid.');
+    if (!['1K', '2K'].includes(size)) throw new Error('Choose an image size.');
+    if (key) await settings.set('gemini_api_key', key);
+    await settings.set('gemini_model', model);
+    await settings.set('gemini_image_size', size);
+  }
+  router.post('/settings/gemini', settingsAction(async (ctx) => { await saveGemini(ctx); return 'Gemini settings saved.'; }));
+  router.post('/settings/gemini/test', settingsAction(async (ctx) => {
+    await saveGemini(ctx);
+    const name = await testGemini({ apiKey: await settings.get('gemini_api_key'), model: await settings.get('gemini_model'), fetchImpl });
+    return `Gemini is connected (${name}).`;
+  }));
   router.post('/settings/meta', settingsAction(async (ctx) => {
     const appId = String(ctx.body.meta_app_id || '').trim();
     const configId = String(ctx.body.meta_config_id || '').trim();
@@ -461,6 +503,25 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     await settings.set('last_cron_tick', now());
     sendJson(ctx.res, 200, { ok: true, ran });
   }, { public: true });
+
+  // Messages posted in a brand's request channel arrive here (Slack Events API).
+  router.post('/api/slack/events', async (ctx) => {
+    const valid = verifySlackSignature({
+      signingSecret: await settings.get('slack_signing_secret'),
+      timestamp: ctx.req.headers['x-slack-request-timestamp'],
+      signature: ctx.req.headers['x-slack-signature'],
+      rawBody: ctx.rawBody,
+    });
+    if (!valid) return send(ctx.res, 401, 'Invalid signature');
+    const body = ctx.body || {};
+    if (body.type === 'url_verification') return sendJson(ctx.res, 200, { challenge: String(body.challenge || '') });
+    send(ctx.res, 200, ''); // answer Slack straight away; it resends anything slower than 3 seconds
+    const ev = body.event || {};
+    // Only people's own top-level messages: no bots, edits, joins, files-only posts or thread replies.
+    if (body.type !== 'event_callback' || ev.type !== 'message' || ev.subtype || ev.bot_id || ev.thread_ts || !ev.text) return;
+    try { await engine.intake({ channel: ev.channel, ts: ev.ts, text: ev.text }); }
+    catch (err) { log.error('slack intake failed', err.message); }
+  }, { public: true, machine: true });
 
   router.post('/api/slack/interactions', async (ctx) => {
     const valid = verifySlackSignature({
@@ -542,7 +603,7 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
       log.error(`${req.method} ${pathname} failed:`, err);
       if (res.headersSent) return res.end();
       const status = err.status || 500;
-      if (status === 413 && pathname.endsWith('/image')) return sendJson(res, 413, { ok: false, error: 'That image is over 8 MB. Export it smaller and try again.' });
+      if (status === 413 && /\/(image|logo)$/.test(pathname)) return sendJson(res, 413, { ok: false, error: 'That file is too large. Export it smaller and try again.' });
       sendHtml(res, status, views.messagePage({ title: 'Error', heading: status === 413 ? 'That was too large' : 'Something went wrong', text: status === 413 ? 'Shorten the text and try again.' : 'The error was logged. Try again in a moment.' }));
     }
   }

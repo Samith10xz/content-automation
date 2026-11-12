@@ -35,3 +35,14 @@ See `.env.example`. API keys for Claude and Slack are entered in the app under S
 
 A Meta app in Development mode publishes posts only people with a role on the app can see. Switch the app to Live
 (using /privacy and /data-deletion) for public posts. LinkedIn, TikTok and X are recorded as skipped.
+
+## Requests from Slack and Gemini images
+
+- Settings → Gemini images: API key from Google AI Studio. Every post without an image gets one from Gemini
+  (4:5 JPG with the headline and, if uploaded on the brand page, the logo).
+- Brand page → Slack request channel ID: each message in that channel becomes a brief for the brand.
+  The draft goes to the brand's approval channel; the requester gets replies in their thread.
+- Feedback on the draft: text changes go to Claude; changes to the picture edit the Gemini image.
+  A design uploaded by hand is never overwritten.
+- Slack app needs Event Subscriptions (`/api/slack/events`, events `message.channels`, `message.groups`)
+  and the scopes `channels:history`, `groups:history`.

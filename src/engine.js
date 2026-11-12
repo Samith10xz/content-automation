@@ -4,6 +4,7 @@
 import { MAX_VERSIONS, PLATFORMS, PUBLISHABLE, now, parseJson, formatTime } from './util.js';
 import { generateContent, DEFAULT_MODEL } from './services/claude.js';
 import { createMeta } from './services/meta.js';
+import { generateImage, imagePrompt, DEFAULT_IMAGE_MODEL } from './services/gemini.js';
 import { createMedia, instagramProblem } from './media.js';
 import { decrypt } from './security.js';
 
@@ -56,12 +57,12 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
     setImmediate(() => drain().catch((err) => log.error('queue error', err)));
   }
 
-  async function createPost({ workspaceId, actor, brief, platforms, publishAt }) {
+  async function createPost({ workspaceId, actor, brief, platforms, publishAt, sourceRef = null }) {
     const t = now();
     const { insertId } = await db.run(
-      `INSERT INTO posts (workspace_id, created_by, status, version, brief, platforms, publish_at, created_at, updated_at)
-       VALUES (?, ?, 'generating', 0, ?, ?, ?, ?, ?)`,
-      [workspaceId, actor, JSON.stringify(brief), platforms.join(','), publishAt || null, t, t]);
+      `INSERT INTO posts (workspace_id, created_by, status, version, brief, platforms, publish_at, source_ref, created_at, updated_at)
+       VALUES (?, ?, 'generating', 0, ?, ?, ?, ?, ?, ?)`,
+      [workspaceId, actor, JSON.stringify(brief), platforms.join(','), publishAt || null, sourceRef, t, t]);
     await addEvent(insertId, 'created', actor);
     await enqueue('generate', insertId);
     return insertId;
@@ -79,6 +80,7 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
       const sent = await slack.postReview(token, ws.slack_channel, post, ws, config.appUrl);
       await db.run('UPDATE posts SET slack_channel = ?, slack_ts = ? WHERE id = ?', [sent.channel, sent.ts, post.id]);
       await addEvent(post.id, 'slack_sent', 'System');
+      await requestThread(post, `Version ${post.version} is ready. Review it in <#${ws.slack_channel}>.`);
     } catch (err) {
       await addEvent(post.id, 'slack_failed', 'System', err.message);
     }
@@ -101,11 +103,125 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
     try { await slack.updateReview(token, post, ws, config.appUrl); } catch (err) { log.error('slack refresh failed', err.message); }
   }
 
+  /** Reply under the Slack message that asked for this post, if it came from Slack. */
+  async function requestThread(post, text) {
+    const m = /^slack:([A-Z0-9]+):([\d.]+)$/.exec(post.source_ref || '');
+    if (!m) return;
+    const token = await slackToken();
+    if (!token) return;
+    try { await slack.postThread(token, m[1], m[2], text); } catch (err) { log.error('slack request reply failed', err.message); }
+  }
+
   async function slackThread(post, text) {
     if (!post.slack_ts || !post.slack_channel) return;
     const token = await slackToken();
     if (!token) return;
     try { await slack.postThread(token, post.slack_channel, post.slack_ts, text); } catch (err) { log.error('slack thread failed', err.message); }
+  }
+
+  // ---- Images from Gemini ----
+
+  /**
+   * Make (or edit) the post's image with Gemini. Never throws: a failure is recorded on the post
+   * and the post carries on without a new image.
+   */
+  async function makeImage(post, ws, content, { editNote = '', previousId = null } = {}) {
+    const apiKey = await settings.get('gemini_api_key');
+    if (!apiKey) return false;
+    const references = [];
+    const previous = editNote && previousId ? await media.bytes(previousId) : null;
+    if (previous) references.push(previous);
+    const logo = !previous && ws.logo_id ? await media.bytes(ws.logo_id) : null;
+    if (logo) references.push(logo);
+    const model = (await settings.get('gemini_model')) || DEFAULT_IMAGE_MODEL;
+    const args = {
+      apiKey, model, references, fetchImpl,
+      imageSize: (await settings.get('gemini_image_size')) || '1K',
+      prompt: imagePrompt({ brand: ws, content, hasLogo: !!logo, editNote: previous ? editNote : '' }),
+    };
+    let buf;
+    for (let attempt = 1; !buf; attempt++) {
+      try { buf = await generateImage(args); } catch (err) {
+        if (err.permanent || attempt >= 2) { await addEvent(post.id, 'image_failed', 'Gemini', err.message); return false; }
+      }
+    }
+    try {
+      const saved = await media.saveAny(post.id, buf, 'gemini');
+      await db.run('UPDATE posts SET image_id = ?, updated_at = ? WHERE id = ?', [saved.id, now(), post.id]);
+      if (post.image_id) await db.run('DELETE FROM media WHERE id = ?', [post.image_id]);
+      await db.run(
+        `INSERT INTO usage_log (workspace_id, post_id, kind, model, input_tokens, output_tokens, created_at) VALUES (?, ?, 'image', ?, 0, 0, ?)`,
+        [post.workspace_id, post.id, model, now()]);
+      await addEvent(post.id, previous ? 'image_edited' : 'image_generated', 'Gemini', `${saved.width}×${saved.height}`);
+      return true;
+    } catch (err) {
+      await addEvent(post.id, 'image_failed', 'Gemini', err.message);
+      return false;
+    }
+  }
+
+  /** Dashboard button: make a new image, or change the current one when a note is given. */
+  async function generateImageNow(postId, actor, note = '') {
+    const post = await getPost(postId);
+    if (!post) throw new ReviewError('Post not found.');
+    if (!post.content) throw new ReviewError('The post has no text yet. Wait until it is written.');
+    if (!['in_review', 'approved', 'scheduled', 'publish_failed'].includes(post.status)) throw new ReviewError('The image can no longer be changed for this post.');
+    if (!(await settings.has('gemini_api_key'))) throw new ReviewError('Add the Gemini API key under Settings first.');
+    const ws = await getBrand(post.workspace_id);
+    note = String(note || '').trim();
+    const edit = note && post.image?.source === 'gemini';
+    const content = note && !edit ? { ...post.content, image_prompt: `${post.content.image_prompt}\n${note}` } : post.content;
+    const ok = await makeImage(post, ws, content, edit ? { editNote: note, previousId: post.image.id } : {});
+    if (!ok) {
+      const last = await db.get(`SELECT note FROM post_events WHERE post_id = ? AND kind = 'image_failed' ORDER BY id DESC LIMIT 1`, [post.id]);
+      throw new ReviewError(last?.note || 'The image could not be generated.');
+    }
+    await refreshSlackReview(await getPost(post.id));
+  }
+
+  // ---- Requests from Slack ----
+
+  const cleanSlackText = (text) => String(text || '')
+    .replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, '$2 ($1)')
+    .replace(/<(https?:\/\/[^>]+)>/g, '$1')
+    .replace(/<[@#!][^>]*>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+    .replace(/[ \t]+/g, ' ').trim();
+
+  /** A message posted in a brand's request channel becomes a brief. Returns the new post id, or null if ignored. */
+  async function intake({ channel, ts, text }) {
+    const ws = await db.get('SELECT * FROM workspaces WHERE slack_request_channel = ?', [String(channel || '')]);
+    if (!ws || !/^[\d.]+$/.test(String(ts || ''))) return null;
+    const goal = cleanSlackText(text);
+    if (goal.length < 10) return null;
+    let id;
+    try {
+      id = await createPost({
+        workspaceId: ws.id, actor: 'Slack request', publishAt: null, sourceRef: `slack:${channel}:${ts}`,
+        platforms: ['facebook', 'instagram'],
+        brief: { goal: goal.slice(0, 1000), details: goal.length > 1000 ? goal.slice(1000, 4000) : '', language: 'Same as the request' },
+      });
+    } catch (err) {
+      if (/unique|duplicate/i.test(err.message)) return null; // Slack sent the same message twice
+      throw err;
+    }
+    const post = await getPost(id);
+    const where = ws.slack_channel ? `<#${ws.slack_channel}>` : `the dashboard (<${config.appUrl}/posts/${id}|open>)`;
+    await requestThread(post, `Got it. Writing the post${(await settings.has('gemini_api_key')) ? ' and image' : ''} for ${ws.name}. The draft will go to ${where} for approval.`);
+    kick();
+    return id;
+  }
+
+  /** Brand logo, used as a reference for generated images. */
+  async function setLogo(brandId, buf) {
+    const ws = await getBrand(Number(brandId));
+    if (!ws) throw new ReviewError('Brand not found.');
+    if (!buf?.length) throw new ReviewError('Choose a logo file to upload.');
+    if (buf.length > 2 * 1024 * 1024) throw new ReviewError('That logo is over 2 MB. Export it smaller and try again.');
+    let saved;
+    try { saved = await media.saveAny(0, buf, 'logo'); } catch { throw new ReviewError('The logo must be a PNG or JPG file.'); }
+    await db.run('UPDATE workspaces SET logo_id = ?, updated_at = ? WHERE id = ?', [saved.id, now(), ws.id]);
+    if (ws.logo_id) await db.run('DELETE FROM media WHERE id = ?', [ws.logo_id]);
   }
 
   // ---- Job: write the post ----
@@ -122,6 +238,15 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
       previous: payload.note ? post.content : null, note: payload.note || null, fetchImpl,
     });
     const version = post.version + 1;
+
+    // Image: make one if the post has none; on a revision, change it only if the reviewer asked.
+    if (!post.image) {
+      await makeImage(post, ws, result.content);
+    } else if (payload.note && (result.regenerateImage || post.content?.headline !== result.content.headline)) {
+      if (post.image.source === 'gemini') await makeImage(post, ws, result.content, { editNote: payload.note, previousId: post.image.id });
+      else if (result.regenerateImage) await addEvent(post.id, 'image_kept', 'System', 'The image was uploaded by hand, so it was not changed. Replace it if it needs to change.');
+    }
+
     const updated = await db.run(
       `UPDATE posts SET status = 'in_review', version = ?, content = ?, error = NULL, slack_ts = NULL, slack_channel = NULL, updated_at = ?
        WHERE id = ? AND status = 'generating'`,
@@ -206,7 +331,9 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
       ...failed.map((r) => `⚠️ ${PLATFORMS[r.platform].label}: ${r.error}`),
       ...results.filter((r) => r.status === 'skipped').map((r) => `➖ ${PLATFORMS[r.platform].label}: ${r.error}`),
     ];
-    await slackThread(post, `${failed.length ? 'Publishing finished with problems' : 'Published'}\n${lines.join('\n')}\n<${config.appUrl}/posts/${postId}|Open in dashboard>`);
+    const summary = `${failed.length ? 'Publishing finished with problems' : 'Published'}\n${lines.join('\n')}\n<${config.appUrl}/posts/${postId}|Open in dashboard>`;
+    await slackThread(post, summary);
+    await requestThread(post, summary);
   }
 
   const handlers = { generate: runGenerate, publish: runPublish };
@@ -238,7 +365,10 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
       if (giveUp && job.post_id && job.kind === 'generate') {
         const failed = await db.run(`UPDATE posts SET status = 'failed', error = ?, updated_at = ? WHERE id = ? AND status = 'generating'`,
           [err.message, now(), job.post_id]);
-        if (failed.changes) await addEvent(job.post_id, 'failed', 'System', err.message);
+        if (failed.changes) {
+          await addEvent(job.post_id, 'failed', 'System', err.message);
+          await requestThread(await getPost(job.post_id), `I could not write this post: ${err.message}`);
+        }
       }
       if (giveUp && job.post_id && job.kind === 'publish') {
         await db.run(`UPDATE publish_results SET status = 'failed', error = COALESCE(error, ?), updated_at = ? WHERE post_id = ? AND status = 'pending'`,
@@ -311,6 +441,7 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
     const post = await decide(postId, 'rejected', actor);
     await addEvent(post.id, 'rejected', actor, note);
     await updateSlack(post, `Rejected by ${actor}${note ? `: ${note}` : ''}`);
+    await requestThread(post, `Rejected by ${actor}${note ? `: ${note}` : ''}. Post a new request to start again.`);
     return post;
   }
 
@@ -387,5 +518,6 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
   return {
     getPost, createPost, approve, reject, requestChanges, retry, retryPublish,
     setImage, removeImage, publishResults, drain, kick, addEvent, media, meta,
+    generateImageNow, intake, setLogo,
   };
 }

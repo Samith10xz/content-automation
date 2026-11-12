@@ -25,9 +25,16 @@ export function jpegInfo(buf) {
 
 export const isPng = (buf) => buf?.length > 8 && buf.readUInt32BE(0) === 0x89504e47;
 
+/** Width and height of a PNG, or null. */
+export function pngInfo(buf) {
+  if (!isPng(buf) || buf.length < 24) return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
 /** Why this image can't go to Instagram, or '' if it can. */
 export function instagramProblem(image) {
   if (!image) return 'Instagram needs an image. Upload one before approving.';
+  if (image.mime && image.mime !== 'image/jpeg') return 'Instagram only accepts JPG images. Replace this image with a JPG.';
   const ratio = image.width / image.height;
   if (ratio < IG_MIN_RATIO - 0.005 || ratio > IG_MAX_RATIO + 0.005) {
     return `Instagram only accepts images between 4:5 (portrait) and 1.91:1 (landscape). This one is ${image.width}×${image.height}. Export a 1080×1080 or 1080×1350 JPG.`;
@@ -38,13 +45,35 @@ export function instagramProblem(image) {
 export function createMedia(db, appUrl) {
   const toImage = (row) => row && {
     id: row.id, token: row.token, width: Number(row.width), height: Number(row.height), size: Number(row.size),
-    url: `${appUrl}/media/${row.token}.jpg`,
+    mime: row.mime, source: row.source || 'upload',
+    url: `${appUrl}/media/${row.token}.${row.mime === 'image/png' ? 'png' : 'jpg'}`,
   };
   return {
     toImage,
     async forPost(post) {
       if (!post?.image_id) return null;
-      return toImage(await db.get('SELECT id, token, width, height, size FROM media WHERE id = ?', [post.image_id]));
+      return toImage(await db.get('SELECT id, token, width, height, size, mime, source FROM media WHERE id = ?', [post.image_id]));
+    },
+    async byId(id) {
+      if (!id) return null;
+      return toImage(await db.get('SELECT id, token, width, height, size, mime, source FROM media WHERE id = ?', [id]));
+    },
+    /** Raw bytes of a stored image, for sending to the image model as a reference. */
+    async bytes(id) {
+      const row = id && await db.get('SELECT mime, data FROM media WHERE id = ?', [id]);
+      return row ? { mime: row.mime, data: Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data) } : null;
+    },
+    /** Store an image made by the image model, or a brand logo (JPG or PNG). */
+    async saveAny(postId, buf, source) {
+      const info = jpegInfo(buf) || pngInfo(buf);
+      if (!info || !info.width || !info.height) throw new Error('That file is not a JPG or PNG image.');
+      if (buf.length > MAX_IMAGE_BYTES) throw new Error('That image is over 8 MB.');
+      const mime = isPng(buf) ? 'image/png' : 'image/jpeg';
+      const token = randomToken(24);
+      const { insertId } = await db.run(
+        'INSERT INTO media (post_id, token, mime, width, height, size, data, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [postId, token, mime, info.width, info.height, buf.length, buf, source, now()]);
+      return { id: insertId, mime, ...info };
     },
     /** Validate and store an uploaded JPEG. Throws an Error with a reader-facing message. */
     async save(postId, buf) {
@@ -55,8 +84,8 @@ export function createMedia(db, appUrl) {
       if (!info || !info.width || !info.height) throw new Error('That file is not a JPG image. Export the design as JPG and try again.');
       const token = randomToken(24);
       const { insertId } = await db.run(
-        'INSERT INTO media (post_id, token, mime, width, height, size, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [postId, token, 'image/jpeg', info.width, info.height, buf.length, buf, now()]);
+        'INSERT INTO media (post_id, token, mime, width, height, size, data, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [postId, token, 'image/jpeg', info.width, info.height, buf.length, buf, 'upload', now()]);
       return { id: insertId, ...info };
     },
     async read(token) {

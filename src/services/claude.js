@@ -51,6 +51,7 @@ function tool(platforms) {
         captions: { type: 'object', properties: captions, required: platforms },
         hashtags: { type: 'array', items: { type: 'string' } },
         cta: { type: 'string' },
+        regenerate_image: { type: 'boolean', description: 'Revisions only: true when the reviewer asked for any change to the picture itself (visual, colours, layout, text on the image).' },
       },
       required: ['headline', 'image_prompt', 'captions', 'hashtags', 'cta'],
     },
@@ -101,6 +102,7 @@ export async function generateContent({ apiKey, model, workspace, brief, platfor
   if (!content.headline || missing.length) throw new Error(`Claude returned an incomplete post (missing: ${['headline'].filter(() => !content.headline).concat(missing).join(', ')}).`);
   return {
     content,
+    regenerateImage: input.regenerate_image === true,
     model: data.model || model || DEFAULT_MODEL,
     usage: { input: data.usage?.input_tokens || 0, output: data.usage?.output_tokens || 0 },
   };

@@ -159,7 +159,21 @@ function connectionsCard({ brand, csrf, metaReady, connection }) {
 </div>`;
 }
 
-export function brandFormBody({ brand, csrf, err, slackReady, metaReady, connection }) {
+function logoCard({ brand, csrf, logo }) {
+  if (!brand.id) return '';
+  return `<div class="card">
+  <div class="row spread"><h2>Logo</h2>${logo ? '<span class="pill approved">Saved</span>' : '<span class="pill">Not set</span>'}</div>
+  <p class="muted">Generated images place this logo in a corner. Without it, images are made with no logo.</p>
+  ${logo ? `<img class="logo-preview" src="${esc(logo.url)}" alt="${esc(brand.name)} logo" width="${logo.width}" height="${logo.height}">` : ''}
+  <form class="stack" method="post" action="/brands/${brand.id}/logo" data-upload data-csrf="${esc(csrf)}" data-max-mb="2">
+    <label for="logo_file">${logo ? 'Replace the logo' : 'Upload the logo'} <small>PNG or JPG, up to 2 MB. A PNG with a transparent background works best.</small>
+      <input id="logo_file" type="file" accept="image/png,image/jpeg"></label>
+    <div class="row"><button class="btn primary" type="submit">Upload</button><span class="muted" data-status role="status"></span></div>
+  </form>
+</div>`;
+}
+
+export function brandFormBody({ brand, csrf, err, slackReady, metaReady, connection, logo }) {
   const b = brand;
   const isNew = !b.id;
   return `<p><a href="/brands">← Brands</a></p>
@@ -183,8 +197,11 @@ ${notice('bad', err)}
     <textarea id="sample_posts" name="sample_posts" maxlength="6000">${esc(b.sample_posts)}</textarea></label>
   <label for="slack_channel">Slack approval channel ID <small>${slackReady ? 'Example: C0123ABCD. Find it in Slack under the channel name → About. Invite the app to that channel. Leave empty to review in the dashboard only.' : 'Connect Slack in Settings first. Until then posts are reviewed in the dashboard.'}</small>
     <input id="slack_channel" name="slack_channel" type="text" value="${esc(b.slack_channel)}" maxlength="30" placeholder="C0123ABCD"></label>
+  <label for="slack_request_channel">Slack request channel ID <small>Optional. Every message someone posts in this channel becomes a brief for this brand, written and designed automatically. Use a channel kept only for requests, and invite the app to it.</small>
+    <input id="slack_request_channel" name="slack_request_channel" type="text" value="${esc(b.slack_request_channel)}" maxlength="30" placeholder="C0456EFGH"></label>
   <div class="row"><button class="btn primary" type="submit">${isNew ? 'Add brand' : 'Save changes'}</button></div>
 </form>
+${logoCard({ brand: b, csrf, logo })}
 ${connectionsCard({ brand: b, csrf, metaReady, connection })}`;
 }
 
@@ -235,18 +252,19 @@ const EVENT_LABELS = {
   slack_failed: 'Slack message failed', approved: 'Approved', rejected: 'Rejected',
   changes_requested: 'Changes requested', failed: 'Failed', retried: 'Retried',
   image_added: 'Image added', image_removed: 'Image removed', published: 'Published',
+  image_generated: 'Image generated', image_edited: 'Image changed', image_failed: 'Image generation failed', image_kept: 'Image not changed',
   publish_failed: 'Publishing failed', publish_retried: 'Publishing retried',
 };
 
 const RESULT_LABELS = { pending: 'Waiting', published: 'Published', failed: 'Failed', skipped: 'Not connected' };
 const RESULT_PILL = { pending: 'publishing', published: 'published', failed: 'failed', skipped: '' };
 
-function imageCard({ post, brand, csrf }) {
+function imageCard({ post, brand, csrf, geminiReady }) {
   const c = post.content;
   const canEdit = ['generating', 'in_review', 'approved', 'scheduled', 'publish_failed', 'failed'].includes(post.status);
   const igWarning = post.platforms.includes('instagram') ? instagramProblem(post.image) : '';
   const upload = canEdit ? `<form class="stack" method="post" action="/posts/${post.id}/image" data-upload data-csrf="${esc(csrf)}">
-      <label for="image_file">${post.image ? 'Replace the image' : 'Upload the image'} <small>JPG only, up to 8 MB. From Canva: Share → Download → JPG. For Instagram use 1080×1080 or 1080×1350.</small>
+      <label for="image_file">${post.image ? 'Replace with your own design' : 'Upload your own design'} <small>JPG only, up to 8 MB. From Canva: Share → Download → JPG. For Instagram use 1080×1080 or 1080×1350.</small>
         <input id="image_file" type="file" accept="image/jpeg"></label>
       <div class="row"><button class="btn primary" type="submit">Upload</button><span class="muted" data-status role="status"></span></div>
     </form>` : '';
@@ -257,9 +275,16 @@ function imageCard({ post, brand, csrf }) {
       <p class="muted">${post.image.width}×${post.image.height} · ${Math.round(post.image.size / 1024)} KB</p>`
     : c ? `<div class="preview" style="background:${esc(brand.primary_color)};color:${textOn(brand.primary_color)}"><span class="ph">${esc(c.headline)}</span><span class="pb">${esc(brand.name)}</span></div>
       <p class="muted">Layout sketch only. This is not published.</p>` : '';
+  const canGenerate = geminiReady && c && ['in_review', 'approved', 'scheduled', 'publish_failed'].includes(post.status);
+  const madeByGemini = post.image?.source === 'gemini';
+  const generate = canGenerate ? `<form class="stack" method="post" action="/posts/${post.id}/image/generate">${csrfField(csrf)}
+      <label for="image_note">${post.image ? (madeByGemini ? 'Change this image' : 'Replace with a generated image') : 'Generate the image'} <small>${madeByGemini ? 'Say what to change, or leave empty for a completely new image.' : 'Optional: anything extra the image should show.'} Takes up to a minute.</small>
+        <input id="image_note" name="note" type="text" maxlength="1000" placeholder="${madeByGemini ? 'Make the background lighter and the headline bigger' : ''}"></label>
+      <div><button class="btn" type="submit">${post.image ? 'Generate again' : 'Generate with Gemini'}</button></div>
+    </form>` : '';
   return `<div class="card"><h2>Image</h2>
     ${igWarning && canEdit ? `<div class="notice warn">${esc(igWarning)}</div>` : ''}
-    ${shown}${remove}${upload}
+    ${shown}${post.image ? `<p class="muted">${madeByGemini ? 'Made by Gemini.' : 'Uploaded by hand.'}</p>` : ''}${remove}${generate}${upload}
     ${c?.image_prompt ? `<div class="caption"><h3>Image idea from Claude</h3><p>${esc(c.image_prompt)}</p></div>` : ''}
   </div>`;
 }
@@ -281,7 +306,7 @@ function publishingCard({ post, results, connection, csrf }) {
   return `<div class="card"><h2>Publishing</h2><ul class="results">${rows}</ul>${retry}</div>`;
 }
 
-export function postBody({ post, brand, events, results = [], connection = null, csrf }) {
+export function postBody({ post, brand, events, results = [], connection = null, csrf, geminiReady = false }) {
   const c = post.content;
   const tz = brand.timezone;
   const state = {
@@ -339,7 +364,7 @@ ${state}
   </div>
   <div class="stack" style="gap:24px">
     ${review}
-    ${results.length ? publishingCard({ post, results, connection, csrf }) + imageCard({ post, brand, csrf }) : imageCard({ post, brand, csrf }) + publishingCard({ post, results, connection, csrf })}
+    ${results.length ? publishingCard({ post, results, connection, csrf }) + imageCard({ post, brand, csrf, geminiReady }) : imageCard({ post, brand, csrf, geminiReady }) + publishingCard({ post, results, connection, csrf })}
     <div class="card"><h2>Activity</h2><ul class="timeline">${timeline}</ul></div>
   </div>
 </div>`;
@@ -369,7 +394,24 @@ export function settingsBody({ csrf, state, appUrl }) {
     <input id="slack_signing_secret" name="slack_signing_secret" type="password" autocomplete="off" placeholder="${state.slackSecret ? '••••••••' : ''}"></label>
   <div class="row"><button class="btn primary" type="submit">Save</button>
     ${state.slackToken ? `<button class="btn" type="submit" formaction="/settings/slack/test">Save and test</button>` : ''}</div>
-  <p class="muted">Then set each brand’s Slack channel ID on its brand page.</p>
+  <p class="muted">For requests from Slack, also turn on Event Subscriptions with this Request URL, subscribe to the bot events <span class="mono">message.channels</span> and <span class="mono">message.groups</span>, and add the scopes <span class="mono">channels:history</span> and <span class="mono">groups:history</span>:</p>
+  <p class="mono" style="overflow-wrap:anywhere">${esc(state.eventsUrl)}</p>
+  <p class="muted">Then set each brand’s Slack channel IDs on its brand page.</p>
+</form>
+<form class="card" method="post" action="/settings/gemini">
+  ${csrfField(csrf)}
+  <div class="row spread"><h2>Gemini images</h2>${saved(state.geminiKey)}</div>
+  <p class="muted">Gemini makes the image for each post, with the headline and brand logo on it. Create a key at aistudio.google.com. Usage is billed to your Google account.</p>
+  <label for="gemini_api_key">API key <small>${state.geminiKey ? 'A key is saved. Enter a new one only to replace it.' : 'From Google AI Studio → Get API key'}</small>
+    <input id="gemini_api_key" name="gemini_api_key" type="password" autocomplete="off" placeholder="${state.geminiKey ? '••••••••' : ''}"></label>
+  <div class="row">
+    <label for="gemini_model" style="flex:2;min-width:220px">Image model<input id="gemini_model" name="gemini_model" type="text" value="${esc(state.geminiModel)}" required maxlength="80"></label>
+    <label for="gemini_image_size" style="flex:1;min-width:140px">Image size<select id="gemini_image_size" name="gemini_image_size">
+      <option value="1K"${state.geminiSize === '1K' ? ' selected' : ''}>Standard (1K)</option>
+      <option value="2K"${state.geminiSize === '2K' ? ' selected' : ''}>Large (2K, costs more)</option></select></label>
+  </div>
+  <div class="row"><button class="btn primary" type="submit">Save</button>
+    ${state.geminiKey ? `<button class="btn" type="submit" formaction="/settings/gemini/test">Save and test</button>` : ''}</div>
 </form>
 <form class="card" method="post" action="/settings/meta">
   ${csrfField(csrf)}
