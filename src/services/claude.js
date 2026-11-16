@@ -29,7 +29,7 @@ function userPrompt({ brief, platforms, previous, note }) {
     brief.details ? `Details and offer: ${brief.details}` : '',
     `Language: ${brief.language || 'English'}`,
     `Write one caption for each of these platforms:\n${platforms.map((p) => `- ${PLATFORM_GUIDE[p]}`).join('\n')}`,
-    'Also write: a headline of at most 8 words to place on the image, an image prompt describing the visual (no text in the image), 5-8 hashtags without the # sign, and a short call to action.',
+    'Also write: a headline of at most 8 words to place on the image, an image prompt describing the visual (no text in the image), 5-8 hashtags without the # sign, and a call to action of at most 3 words that fits on a button (for example "Send now" or "Get a quote").',
   ];
   if (previous && note) {
     parts.push(`This is a revision. The previous version was:\n${JSON.stringify(previous, null, 2)}`);
