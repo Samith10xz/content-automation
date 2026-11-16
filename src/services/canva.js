@@ -118,11 +118,11 @@ export function createCanva({ fetchImpl = fetch, sleep = (ms) => new Promise((r)
     },
 
     /** Brand templates that have data fields to fill. */
-    async listTemplates(tokenValue) {
+    async listTemplates(tokenValue, { dataset = 'non_empty' } = {}) {
       const out = [];
       let continuation = '';
       for (let i = 0; i < 5; i++) {
-        const q = new URLSearchParams({ dataset: 'non_empty', limit: '50' });
+        const q = new URLSearchParams({ dataset, limit: '50' });
         if (continuation) q.set('continuation', continuation);
         const data = await call('GET', `/brand-templates?${q}`, tokenValue);
         for (const t of data.items || []) out.push({ id: String(t.id), title: t.title || 'Untitled template', thumbnail: t.thumbnail?.url || '' });

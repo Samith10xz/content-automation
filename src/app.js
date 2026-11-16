@@ -556,7 +556,18 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     const row = brand && await canvaRow(brand.id);
     if (!row) return redirect(ctx.res, `/brands/${Number(ctx.params.id) || 0}`);
     let templates = []; let loadError = '';
-    try { templates = await engine.canva.listTemplates(await engine.canvaToken(row)); } catch (err) { loadError = err.message; }
+    let hint = '';
+    try {
+      const token = await engine.canvaToken(row);
+      templates = await engine.canva.listTemplates(token);
+      if (!templates.length) {
+        const all = await engine.canva.listTemplates(token, { dataset: 'any' });
+        hint = all.length
+          ? `Canva lists ${all.length} brand template${all.length === 1 ? '' : 's'} (${all.slice(0, 5).map((t) => t.title).join(', ')}) but none has data fields. Label the fields in Canva (Apps → Bulk create → Labels) and publish it again.`
+          : 'Canva returned no brand templates at all for this connection. Publish the design as a brand template in the same Canva team as the connected account, or check that this Canva plan allows brand templates in the API.';
+      }
+    } catch (err) { loadError = err.message; }
+    if (hint) loadError = hint;
     render(ctx, { title: 'Canva template', active: 'brands', body: views.canvaBody({ brand, row: { ...row, map: parseJson(row.data, {}) }, templates, loadError, csrf: ctx.session.csrf }) });
   });
 
