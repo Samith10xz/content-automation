@@ -5,7 +5,7 @@ import { MAX_VERSIONS, PLATFORMS, PUBLISHABLE, now, parseJson, formatTime } from
 import { generateContent, DEFAULT_MODEL } from './services/claude.js';
 import { createMeta } from './services/meta.js';
 import { generateImage, imagePrompt, DEFAULT_IMAGE_MODEL } from './services/gemini.js';
-import { createCanva, autofillData } from './services/canva.js';
+import { createCanva, autofillData, pickLayout } from './services/canva.js';
 import { encrypt } from './security.js';
 import { createMedia, instagramProblem } from './media.js';
 import { decrypt } from './security.js';
@@ -236,7 +236,8 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
    * Without one: a finished image from Gemini. `editNote` changes the picture; `textChanged` only re-fills the text.
    */
   async function makeCreative(post, ws, content, { editNote = '', textChanged = false } = {}) {
-    const conn = await canvaConnection(ws.id);
+    const brandConn = await canvaConnection(ws.id);
+    const conn = brandConn && pickLayout(brandConn, post.id);
     if (!conn) {
       // Gemini drew the headline on the image, so only a headline change needs a new image.
       if (!editNote && textChanged && post.content?.headline === content.headline) return true;

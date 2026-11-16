@@ -183,6 +183,20 @@ export function guessUse(name, type, taken) {
   return 'none';
 }
 
+/**
+ * A brand can hold several templates ("layouts"): the main one plus map.layouts. Each post gets one
+ * by its id, so layouts rotate across posts and a post keeps the same layout when it is revised.
+ * Returns the connection with the chosen layout's template, fields and photo shape swapped in.
+ */
+export function pickLayout(conn, seed) {
+  const pool = [
+    { id: conn.extra_id, title: conn.extra_name, fields: conn.map?.fields || {}, shape: conn.map?.shape || '1:1' },
+    ...((conn.map?.layouts || []).filter((l) => l?.id && l.id !== conn.extra_id)),
+  ];
+  const l = pool[Math.abs(Number(seed) || 0) % pool.length];
+  return { ...conn, extra_id: l.id, extra_name: l.title, map: { ...conn.map, fields: l.fields, shape: l.shape || '1:1' } };
+}
+
 /** Autofill data for a post from the saved field choices. */
 export function autofillData(fields, { assetId, content, brandName }) {
   const data = {};

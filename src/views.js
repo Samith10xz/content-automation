@@ -233,6 +233,17 @@ ${row.extra_id ? `<form class="card" method="post" action="/brands/${brand.id}/c
   <label for="shape">Shape of the photo area <small>Gemini makes the photo in this shape so it fits the template without awkward cropping.</small>
     <select id="shape" name="shape">${Object.entries(shapes).map(([k, label]) => `<option value="${k}"${(row.map.shape || '1:1') === k ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
   <div><button class="btn primary" type="submit">Save</button></div>
+</form>` : ''}
+${row.extra_id && templates.filter((t) => t.id !== row.extra_id).length ? `<form class="card" method="post" action="/brands/${brand.id}/canva/layouts">
+  ${csrfField(csrf)}
+  <h2>3. More layouts <small>optional</small></h2>
+  <p class="muted">Tick other templates to use as well. New posts take the layouts in turn, so the designs do not all look the same. Each one is filled by field name: <span class="mono">photo</span>, <span class="mono">headline</span>, <span class="mono">cta</span>, <span class="mono">brand</span>.</p>
+  ${templates.filter((t) => t.id !== row.extra_id).map((t) => {
+    const cur = (row.map.layouts || []).find((l) => l.id === t.id);
+    return `<label for="lay_${esc(t.id)}"><span><input id="lay_${esc(t.id)}" type="checkbox" name="layout_${esc(t.id)}" value="1"${cur ? ' checked' : ''}> <strong>${esc(t.title)}</strong></span>
+    <select name="shape_${esc(t.id)}" aria-label="Photo shape for ${esc(t.title)}">${Object.entries(shapes).map(([k, label]) => `<option value="${k}"${(cur?.shape || '1:1') === k ? ' selected' : ''}>${label}</option>`).join('')}</select></label>`;
+  }).join('')}
+  <div><button class="btn primary" type="submit">Save layouts</button></div>
 </form>` : ''}`;
 }
 

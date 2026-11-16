@@ -195,3 +195,13 @@ test('connecting Canva through the pages: sign-in, template choice, field choice
     assert.equal(await ctx.db.get(`SELECT id FROM connections WHERE workspace_id = ? AND platform = 'canva'`, [ws]), undefined);
   } finally { await web.close(); }
 });
+
+test('pickLayout rotates layouts by post id and keeps one per post', async () => {
+  const { pickLayout } = await import('../src/services/canva.js');
+  const conn = { extra_id: 'A', extra_name: 'Main', map: { fields: { p: { type: 'image', use: 'photo' } }, shape: '9:16', layouts: [{ id: 'B', title: 'Second', fields: { q: { type: 'image', use: 'photo' } }, shape: '1:1' }] } };
+  assert.equal(pickLayout(conn, 2).extra_id, 'A');
+  assert.equal(pickLayout(conn, 3).extra_id, 'B');
+  assert.equal(pickLayout(conn, 3).map.shape, '1:1');
+  assert.equal(pickLayout(conn, 3).map.fields.q.use, 'photo');
+  assert.equal(pickLayout({ ...conn, map: { ...conn.map, layouts: [] } }, 7).extra_id, 'A');
+});

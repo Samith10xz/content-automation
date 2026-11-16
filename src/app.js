@@ -606,6 +606,39 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     redirect(ctx.res, withMsg(`/brands/${Number(ctx.params.id)}`, 'msg', 'Canva template saved. New posts will be designed with it.'));
   });
 
+  // Extra layouts: more templates for the same brand. Posts rotate through them.
+  router.post('/brands/:id/canva/layouts', async (ctx) => {
+    const brand = await getBrand(ctx.params.id);
+    const row = brand && await canvaRow(brand.id);
+    if (!row?.extra_id) return redirect(ctx.res, `/brands/${Number(ctx.params.id) || 0}`);
+    const back = `/brands/${brand.id}/canva`;
+    try {
+      const token = await engine.canvaToken(row);
+      const map = parseJson(row.data, {});
+      const existing = new Map((map.layouts || []).map((l) => [l.id, l]));
+      const shapes = ['1:1', '4:5', '16:9', '9:16', '3:4', '4:3'];
+      const layouts = [];
+      for (const t of await engine.canva.listTemplates(token)) {
+        if (t.id === row.extra_id || !ctx.body[`layout_${t.id}`]) continue;
+        const shape = shapes.includes(ctx.body[`shape_${t.id}`]) ? ctx.body[`shape_${t.id}`] : '1:1';
+        let fields = existing.get(t.id)?.fields;
+        if (!fields) {
+          const types = await engine.canva.dataset(token, t.id);
+          const taken = new Set(); fields = {};
+          for (const [name, type] of Object.entries(types)) {
+            const use = guessUse(name, type, taken);
+            if (use !== 'none') taken.add(use);
+            fields[name] = { type, use };
+          }
+        }
+        layouts.push({ id: t.id, title: t.title, fields, shape });
+      }
+      map.layouts = layouts;
+      await db.run('UPDATE connections SET data = ?, updated_at = ? WHERE id = ?', [JSON.stringify(map), now(), row.id]);
+      redirect(ctx.res, withMsg(back, 'msg', layouts.length ? `${layouts.length + 1} layouts will be used in turn.` : 'Using only the main template.'));
+    } catch (err) { redirect(ctx.res, withMsg(back, 'err', err.message)); }
+  });
+
   router.post('/brands/:id/disconnect/canva', async (ctx) => {
     await db.run(`DELETE FROM connections WHERE workspace_id = ? AND platform = 'canva'`, [Number(ctx.params.id) || 0]);
     redirect(ctx.res, withMsg(`/brands/${Number(ctx.params.id) || 0}`, 'msg', 'Disconnected from Canva. Images now come straight from Gemini.'));
