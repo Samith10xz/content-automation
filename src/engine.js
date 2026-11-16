@@ -213,7 +213,7 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
   async function composeCanva(post, ws, content, conn, photoId) {
     try {
       const token = await canvaToken(conn);
-      const photo = await media.byId(photoId);
+      const photo = photoId ? await media.byId(photoId) : null;
       const assetId = photo ? await canva.uploadFromUrl(token, `${ws.name} post ${post.id}`, photo.url) : null;
       const design = await canva.autofill(token, {
         templateId: conn.extra_id, title: `${ws.name} – ${content.headline}`,
@@ -223,7 +223,7 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
       await db.run('UPDATE posts SET image_id = ?, canva_design_id = ?, canva_edit_url = ?, updated_at = ? WHERE id = ?',
         [saved.id, design.id, design.editUrl.slice(0, 600), now(), post.id]);
       if (post.image_id) await db.run('DELETE FROM media WHERE id = ?', [post.image_id]);
-      await addEvent(post.id, 'canva_composed', 'Canva', `${conn.extra_name} · ${saved.width}×${saved.height}`);
+      await addEvent(post.id, 'canva_composed', 'Canva', `${conn.extra_name} · ${saved.width}×${saved.height}${assetId ? '' : ' · TEMPLATE SAMPLE PHOTO (no Gemini photo yet; generate one before approving)'}`);
       return true;
     } catch (err) {
       await addEvent(post.id, 'canva_failed', 'Canva', err.message);
@@ -248,7 +248,8 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
     if (!photoId || editNote || (!textChanged && !editNote && post.image)) {
       const made = await makePhoto(post, ws, content, conn, { editNote });
       if (made) photoId = made;
-      else if (!photoId) return false;
+      // No Gemini photo: still fill the template and keep the sample photo it was designed with,
+      // so the layout can be reviewed. The activity log says the photo is a placeholder.
     }
     return composeCanva({ ...post, photo_id: photoId }, ws, content, conn, photoId);
   }
