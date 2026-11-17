@@ -327,7 +327,7 @@ const EVENT_LABELS = {
   slack_failed: 'Slack message failed', approved: 'Approved', rejected: 'Rejected',
   changes_requested: 'Changes requested', failed: 'Failed', retried: 'Retried',
   image_added: 'Image added', image_removed: 'Image removed', published: 'Published',
-  photo_generated: 'Photo generated', photo_edited: 'Photo changed', canva_composed: 'Designed in Canva',
+  photo_generated: 'Photo generated', photo_added: 'Photo added', photo_edited: 'Photo changed', canva_composed: 'Designed in Canva',
   canva_failed: 'Canva step failed', canva_imported: 'Imported from Canva',
   image_generated: 'Image generated', image_edited: 'Image changed', image_failed: 'Image generation failed', image_kept: 'Image not changed',
   publish_failed: 'Publishing failed', publish_retried: 'Publishing retried',
@@ -336,7 +336,7 @@ const EVENT_LABELS = {
 const RESULT_LABELS = { pending: 'Waiting', published: 'Published', failed: 'Failed', skipped: 'Not connected' };
 const RESULT_PILL = { pending: 'publishing', published: 'published', failed: 'failed', skipped: '' };
 
-function imageCard({ post, brand, csrf, geminiReady }) {
+function imageCard({ post, brand, csrf, geminiReady, canvaReady }) {
   const c = post.content;
   const canEdit = ['generating', 'in_review', 'approved', 'scheduled', 'publish_failed', 'failed'].includes(post.status);
   const igWarning = post.platforms.includes('instagram') ? instagramProblem(post.image) : '';
@@ -344,6 +344,12 @@ function imageCard({ post, brand, csrf, geminiReady }) {
       <label for="image_file">${post.image ? 'Replace with your own design' : 'Upload your own design'} <small>JPG only, up to 8 MB. From Canva: Share → Download → JPG. For Instagram use 1080×1080 or 1080×1350.</small>
         <input id="image_file" type="file" accept="image/jpeg"></label>
       <div class="row"><button class="btn primary" type="submit">Upload</button><span class="muted" data-status role="status"></span></div>
+    </form>` : '';
+  const photoUpload = canEdit && canvaReady && c && ['in_review', 'approved', 'scheduled', 'publish_failed'].includes(post.status)
+    ? `<form class="stack" method="post" action="/posts/${post.id}/photo" data-upload data-csrf="${esc(csrf)}">
+      <label for="photo_file">Photo for the Canva design <small>Made in PromptWise or anywhere else. JPG or PNG, up to 8 MB. It goes into the template with the headline and brand, and the finished design replaces the image above. Takes about a minute.</small>
+        <input id="photo_file" type="file" accept="image/jpeg,image/png"></label>
+      <div class="row"><button class="btn primary" type="submit">Place in Canva design</button><span class="muted" data-status role="status"></span></div>
     </form>` : '';
   const remove = post.image && canEdit
     ? `<form method="post" action="/posts/${post.id}/image/remove">${csrfField(csrf)}<button class="btn link" type="submit">Remove image</button></form>` : '';
@@ -366,8 +372,8 @@ function imageCard({ post, brand, csrf, geminiReady }) {
     ${post.canva_design_id && canEdit ? `<div class="row">${post.canva_edit_url ? `<a class="btn" href="${esc(post.canva_edit_url)}" target="_blank" rel="noopener">Edit in Canva</a>` : ''}
       <form method="post" action="/posts/${post.id}/canva/import">${csrfField(csrf)}<button class="btn" type="submit">Import the edited design</button></form></div>
       <p class="muted">Adjust the design in Canva if needed, then import it so the approved post uses your edit.</p>` : ''}
-    ${remove}${generate}${upload}
-    ${c?.image_prompt ? `<div class="caption"><h3>Image idea from Claude</h3><p>${esc(c.image_prompt)}</p></div>` : ''}
+    ${remove}${generate}${photoUpload}${upload}
+    ${c?.image_prompt ? `<div class="caption"><h3>Image idea from Claude</h3><p>${esc(c.image_prompt)}</p><p class="muted">Copy this into <a href="https://app.promptwise.com/studio/" target="_blank" rel="noopener">PromptWise</a>, then upload the picture above.</p></div>` : ''}
   </div>`;
 }
 
@@ -388,7 +394,7 @@ function publishingCard({ post, results, connection, csrf }) {
   return `<div class="card"><h2>Publishing</h2><ul class="results">${rows}</ul>${retry}</div>`;
 }
 
-export function postBody({ post, brand, events, results = [], connection = null, csrf, geminiReady = false }) {
+export function postBody({ post, brand, events, results = [], connection = null, csrf, geminiReady = false, canvaReady = false }) {
   const c = post.content;
   const tz = brand.timezone;
   const state = {
@@ -446,7 +452,7 @@ ${state}
   </div>
   <div class="stack" style="gap:24px">
     ${review}
-    ${results.length ? publishingCard({ post, results, connection, csrf }) + imageCard({ post, brand, csrf, geminiReady }) : imageCard({ post, brand, csrf, geminiReady }) + publishingCard({ post, results, connection, csrf })}
+    ${results.length ? publishingCard({ post, results, connection, csrf }) + imageCard({ post, brand, csrf, geminiReady, canvaReady }) : imageCard({ post, brand, csrf, geminiReady, canvaReady }) + publishingCard({ post, results, connection, csrf })}
     <div class="card"><h2>Activity</h2><ul class="timeline">${timeline}</ul></div>
   </div>
 </div>`;

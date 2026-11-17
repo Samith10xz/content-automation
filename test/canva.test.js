@@ -205,3 +205,17 @@ test('pickLayout rotates layouts by post id and keeps one per post', async () =>
   assert.equal(pickLayout(conn, 3).map.fields.q.use, 'photo');
   assert.equal(pickLayout({ ...conn, map: { ...conn.map, layouts: [] } }, 7).extra_id, 'A');
 });
+
+test('a photo made elsewhere is placed in the Canva layout and replaces the design', async () => {
+  const ctx = await setup();
+  const id = await ctx.newPost();
+  const first = await ctx.app.engine.getPost(id);
+  const bytes = await ctx.app.engine.media.bytes(first.photo.id);
+  const post = await ctx.app.engine.setPhoto(id, bytes.data, 'Sam');
+  assert.equal(canvaCalls(ctx, '/autofills').length, 2);
+  assert.equal(post.canva_design_id, 'DES2');
+  assert.notEqual(post.photo.id, first.photo.id);
+  assert.notEqual(post.image.id, first.image.id);
+  assert.equal(gemini(ctx).length, 1, 'no new Gemini call');
+  await assert.rejects(() => ctx.app.engine.setPhoto(id, Buffer.from('not an image'), 'Sam'), /not a JPG or PNG/);
+});

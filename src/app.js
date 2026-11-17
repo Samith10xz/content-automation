@@ -219,7 +219,7 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     const connection = await db.get(`SELECT account_name, extra_name FROM connections WHERE workspace_id = ? AND platform = 'meta'`, [brand.id]);
     render(ctx, {
       title: post.content?.headline || 'Post', active: 'posts', refresh: ['generating', 'publishing'].includes(post.status) ? 4 : 0,
-      body: views.postBody({ post, brand, events, results, connection, csrf: ctx.session.csrf, geminiReady: await settings.has('gemini_api_key') }),
+      body: views.postBody({ post, brand, events, results, connection, csrf: ctx.session.csrf, geminiReady: await settings.has('gemini_api_key'), canvaReady: !!(await canvaRow(post.workspace_id))?.extra_id }),
     });
   });
 
@@ -228,6 +228,17 @@ export function createApp({ db, config, fetchImpl = fetch, log = console, autoKi
     try {
       const post = await engine.setImage(ctx.params.id, ctx.rawBuffer, ctx.session.user.name);
       sendJson(ctx.res, 200, { ok: true, redirect: withMsg(`/posts/${post.id}`, 'msg', 'Image added.') });
+    } catch (err) {
+      if (!(err instanceof ReviewError)) throw err;
+      sendJson(ctx.res, 400, { ok: false, error: err.message });
+    }
+  }, { raw: true });
+
+  // A photo made elsewhere (PromptWise, a camera) goes into the Canva layout.
+  router.post('/posts/:id/photo', async (ctx) => {
+    try {
+      const post = await engine.setPhoto(ctx.params.id, ctx.rawBuffer, ctx.session.user.name);
+      sendJson(ctx.res, 200, { ok: true, redirect: withMsg(`/posts/${post.id}`, 'msg', 'Photo placed in the Canva design.') });
     } catch (err) {
       if (!(err instanceof ReviewError)) throw err;
       sendJson(ctx.res, 400, { ok: false, error: err.message });

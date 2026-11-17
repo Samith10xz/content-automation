@@ -618,6 +618,34 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
     return updated;
   }
 
+  /**
+   * A photo made elsewhere (for example in PromptWise) goes into the brand's Canva layout.
+   * The design is exported and becomes the post's image, and the Slack review message is refreshed.
+   */
+  async function setPhoto(postId, buf, actor) {
+    const post = await getPost(postId);
+    if (!post) throw new ReviewError('Post not found.');
+    if (!post.content) throw new ReviewError('The post has no text yet. Wait until it is written.');
+    if (!['in_review', 'approved', 'scheduled', 'publish_failed'].includes(post.status)) throw new ReviewError('The image can no longer be changed for this post.');
+    const ws = await getBrand(post.workspace_id);
+    const brandConn = await canvaConnection(ws.id);
+    if (!brandConn) throw new ReviewError('This brand is not connected to a Canva template. Use "Upload your own design" instead.');
+    let saved;
+    try { saved = await media.saveAny(post.id, buf, 'photo'); } catch (err) { throw new ReviewError(err.message); }
+    await db.run('UPDATE posts SET photo_id = ?, updated_at = ? WHERE id = ?', [saved.id, now(), post.id]);
+    if (post.photo_id) await db.run('DELETE FROM media WHERE id = ?', [post.photo_id]);
+    await addEvent(post.id, 'photo_added', actor, `${saved.width}×${saved.height}`);
+    const before = await db.get('SELECT MAX(id) AS id FROM post_events WHERE post_id = ?', [post.id]);
+    const ok = await composeCanva({ ...post, photo_id: saved.id }, ws, post.content, pickLayout(brandConn, post.id), saved.id);
+    if (!ok) {
+      const last = await db.get(`SELECT note FROM post_events WHERE post_id = ? AND id > ? AND kind = 'canva_failed' ORDER BY id DESC LIMIT 1`, [post.id, before?.id || 0]);
+      throw new ReviewError(last?.note || 'The photo could not be placed in the Canva design.');
+    }
+    const updated = await getPost(post.id);
+    await refreshSlackReview(updated);
+    return updated;
+  }
+
   async function removeImage(postId, actor) {
     const post = await getPost(postId);
     if (!post?.image_id) return;
@@ -634,7 +662,7 @@ export function createEngine({ db, settings, slack, config, fetchImpl = fetch, l
 
   return {
     getPost, createPost, approve, reject, requestChanges, retry, retryPublish,
-    setImage, removeImage, publishResults, drain, kick, addEvent, media, meta,
+    setImage, setPhoto, removeImage, publishResults, drain, kick, addEvent, media, meta,
     generateImageNow, intake, setLogo, importFromCanva, canva, canvaToken,
   };
 }
